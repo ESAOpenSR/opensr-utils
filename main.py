@@ -280,7 +280,10 @@ class windowed_SR_and_saving():
             im = self.get_window(idx,info_dict)
             # batch image
             im = im.unsqueeze(0)
-            
+            # turn into wanted dtype (double)
+            im = im.float()
+            # send to device
+            im = im.to(model.device)
             # if ddpm, prepare for dictionary input
             if forward_call == "perform_custom_inf_step":
                 im = {"LR_image":im,"image":torch.rand(im.shape[0],im.shape[1],512,512)}
@@ -288,9 +291,11 @@ class windowed_SR_and_saving():
             # super-resolute image
             sr = model_sr_call(im,custom_steps=custom_steps)
 
-            # post-processing: hist match
-            if self.hist_match:
-                sr = hq_histogram_matching(sr,lr)
+            # try to move to CPu
+            try:
+                sr = sr.detach().cpu()
+            except:
+                pass
             
             # save SR into image
             self.fill_SR_overlap(sr[0],idx,info_dict)
