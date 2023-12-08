@@ -7,7 +7,7 @@ def extract_rgbnir_from_S2_folder(data_folder):
     stacks them into a single multi-band TIFF file, and saves it to the data folder.
 
     The function assumes the data folder follows the Sentinel-2 SAFE format where image data is located within a subdirectory 
-    named 'IMG_DATA/R10m'. It writes the output stacked TIFF file named 'stacked_RGBNIR.tif' into the provided data folder.
+    named 'IMG_DATA/R10m'. It writes the output stacked TIFF file named 'stacked_10m.tif' into the provided data folder.
     
     Parameters:
     data_folder : str
@@ -18,7 +18,7 @@ def extract_rgbnir_from_S2_folder(data_folder):
     None
 
     Outputs:
-    A TIFF file named 'stacked_RGBNIR.tif' written in the `data_folder`. This file contains the stacked RGB and NIR bands
+    A TIFF file named 'stacked_10m.tif' written in the `data_folder`. This file contains the stacked RGB and NIR bands
     with metadata (geotransform and projection) based on the Red band.
 
     Raises:
@@ -40,7 +40,7 @@ def extract_rgbnir_from_S2_folder(data_folder):
     
     # READ FILES
     # read and store metadata/geotrans
-    with rasterio.open(image_files['R']) as src0:
+    with rasterio.open(image_files[list(image_files.keys())[0]]) as src0:
         meta = src0.meta
 
     # Update meta to reflect the number of layers
@@ -50,10 +50,11 @@ def extract_rgbnir_from_S2_folder(data_folder):
 
     
     # Read each layer and stack them
-    with rasterio.open(data_folder+'/stacked_RGBNIR.tif', 'w', **meta) as dst:
+    with rasterio.open(data_folder+'/stacked_10m.tif', 'w', **meta) as dst:
         for ix, (band_label, file_path) in enumerate(image_files.items(), start=1):
             print("writing band",band_label,"...")
             with rasterio.open(file_path) as src1:
                 dst.write_band(ix, src1.read(1))
-    print("Image succesfully written to:",data_folder+'/stacked_RGBNIR.tif')
+    dst.close()
+    print("Stacked image succesfully written to:",data_folder+'/stacked_10m.tif')
     
