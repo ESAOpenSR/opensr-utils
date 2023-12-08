@@ -1,8 +1,6 @@
 import rasterio
 from einops import rearrange
 from rasterio.transform import Affine
-import json
-from torchvision import transforms
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -374,5 +372,5 @@ if __name__ == "__main__":
 
     sr_obj = windowed_SR_and_saving(folder_path,keep_lr_stack=True)
 
-    #sr_obj.start_super_resolution(band_selection="20m")
+    sr_obj.start_super_resolution(band_selection="20m")
     sr_obj.start_super_resolution(band_selection="10m")
