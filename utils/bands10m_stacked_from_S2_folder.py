@@ -1,7 +1,7 @@
 import os
 import rasterio
 
-def extract_rgbnir_from_S2_folder(data_folder):
+def extract_10mbands_from_S2_folder(data_folder):
     """
     Extracts the Red (B04), Green (B03), Blue (B02), and Near-Infrared (B08) bands from a given Sentinel-2 data folder, 
     stacks them into a single multi-band TIFF file, and saves it to the data folder.
@@ -56,5 +56,5 @@ def extract_rgbnir_from_S2_folder(data_folder):
             with rasterio.open(file_path) as src1:
                 dst.write_band(ix, src1.read(1))
     dst.close()
-    print("Stacked image succesfully written to:",data_folder+'/stacked_10m.tif')
+    print("Stacked image succesfully written to:",data_folder+'stacked_10m.tif')
     

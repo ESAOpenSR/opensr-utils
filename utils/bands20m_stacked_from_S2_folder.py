@@ -61,5 +61,5 @@ def extract_20mbands_from_S2_folder(data_folder):
                 data = src1.read(1)
                 dst.write_band(ix, data)
     dst.close()
-    print("Stacked image succesfully written to:",data_folder+'/stacked_20m.tif')
+    print("Stacked image succesfully written to:",data_folder+'stacked_20m.tif')
 

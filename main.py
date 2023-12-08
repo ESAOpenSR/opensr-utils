@@ -311,13 +311,13 @@ class windowed_SR_and_saving():
         # 3. Create and save placeholder SR file
         if band_selection=="10m":
             # if it doesnt exist, create stacked LR images
-            if not os.path.exists(os.path.join(self.folder_path,"stacked_20m.tif")):
-                print("Stacked 20m bands not found, creating ...")
-                from utils.bands20m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
+            if not os.path.exists(os.path.join(self.folder_path,"stacked_10m.tif")):
+                print("Stacked 10m bands not found, creating ...")
+                from utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
                 extract_10mbands_from_S2_folder(self.folder_path)
 
             # Get File information - 10m bands
-            self.b10m_file_path = os.path.join(self.folder_path,"stacked_RGBNIR.tif")
+            self.b10m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
             self.b10m_info = {}
             self.b10m_info["lr_path"] = self.b10m_file_path
             self.b10m_info["bands"] = [0,1,2,3]
@@ -374,5 +374,5 @@ if __name__ == "__main__":
 
     sr_obj = windowed_SR_and_saving(folder_path,keep_lr_stack=True)
 
-    sr_obj.start_super_resolution(band_selection="20m")
+    #sr_obj.start_super_resolution(band_selection="20m")
     sr_obj.start_super_resolution(band_selection="10m")
