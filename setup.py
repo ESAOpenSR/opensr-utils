@@ -6,7 +6,7 @@ with open('README.md', encoding='utf-8') as f:
 
 setup(
     name='opensr-utils',
-    version='0.1.3',
+    version='0.1.4',
     author = "Simon Donike, Cesar Aybar, Luis Gomez Chova, Freddie Kalaitzis",
     author_email = "accounts@donike.net"
     description = "Utils supporting the ESA openst-model package for Super-Resolution of Senintel-2 Imagery",
