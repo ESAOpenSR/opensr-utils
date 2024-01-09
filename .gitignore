@@ -6,6 +6,7 @@
 *.geotiff
 *.pt
 *.ckpt
+*.safetensors
 
 # other
 __pycache__/*
