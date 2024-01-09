@@ -264,6 +264,7 @@ class windowed_SR_and_saving():
             # Create SR mock-up
             class sr_model():
                 def __init__(self,custom_steps=200):
+                    self.device="cpu"
                     pass
                 def forward(self,lr,custom_steps=200):
                     sr = torch.nn.functional.interpolate(lr, size=(512, 512), mode='bilinear', align_corners=False)
@@ -367,8 +368,6 @@ class windowed_SR_and_saving():
         # if wanted, delete LR stack
         if not self.keep_lr_stack:
             self.delete_LR_stack(info_dict)
-
-
 
 
 if __name__ == "__main__":
