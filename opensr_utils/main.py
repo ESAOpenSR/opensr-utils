@@ -7,8 +7,8 @@ from tqdm import tqdm
 import os
 
 # local imports
-from utils.denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
-from utils.stretching import hq_histogram_matching
+from denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
+from stretching import hq_histogram_matching
 
 
 class windowed_SR_and_saving():
