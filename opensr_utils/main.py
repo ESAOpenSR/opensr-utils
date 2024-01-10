@@ -57,7 +57,6 @@ class windowed_SR_and_saving():
         self.overlap = overlap # number of pixels the windows overlap
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
-        self.custom_steps = custom_steps # number of steps to perform for Diffusion models
 
         # check that folder path exists, and that it's the correct type
         assert os.path.exists(self.folder_path), "Input folder path does not exist"
