@@ -1,17 +1,7 @@
-
-# if we have raw S2 download, create stacked image
-from utils.bands10m_stacked_from_S2_folder   import extract_10mbands_from_S2_folder
-from utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S2_folder
-
-stack_needed=False
-if stack_needed:
-    folder_path = "/data2/simon/test_s2/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729T134559.SAFE"
-    extract_10mbands_from_S2_folder(folder_path)
-    extract_20mbands_from_S2_folder(folder_path)
+from opensr_utils import windowed_SR_and_saving
 
 
 # create object that holds window coordinates etc
-from main import windowed_SR_and_saving
 file_path="/data2/simon/test_s2/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729T134559.SAFE/"
 sr_obj = windowed_SR_and_saving(file_path)
 

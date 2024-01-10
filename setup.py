@@ -6,12 +6,12 @@ with open('README.md', encoding='utf-8') as f:
 
 setup(
     name='opensr-utils',
-    version='0.2.1',
+    version='0.2.2',
     author = "Simon Donike, Cesar Aybar, Luis Gomez Chova, Freddie Kalaitzis",
     author_email = "accounts@donike.net",
     description = "Utilities supporting the ESA opensr-model package for Super-Resolution of Senintel-2 Imagery",
     url = "https://isp.uv.es/opensr/",
-    project_urls={'Source Code': 'https://github.com/yourusername/yourproject'},
+    project_urls={'Source Code': 'https://github.com/ESAopenSR/opensr-utils'},
     license='MIT',
     packages=find_packages(),
     long_description=long_description,

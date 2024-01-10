@@ -52,14 +52,14 @@ class windowed_SR_and_saving():
         # General Settings
         self.folder_path = folder_path # path to folder containing S2 SAFE data format
         self.window_size = window_size # window size of the LR image
-        self.factor=factor # sr factor of the model
-        self.overlap=overlap # number of pixels the windows overlap
+        self.factor = factor # sr factor of the model
+        self.overlap = overlap # number of pixels the windows overlap
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
 
         # check that folder path exists, and that it's the correct type
         assert os.path.exists(self.folder_path), "Input folder path does not exist"
-        assert  self.folder_path[-5:] == ".SAFE", "Input folder path is not a Sentinel-2 .SAFE folder"
+        assert self.folder_path.replace("/","")[-5:] == ".SAFE", "Input folder path is not a Sentinel-2 .SAFE folder"
 
 
     def create_and_save_placeholder_SR_files(self,info_dict,out_name):
@@ -322,6 +322,8 @@ class windowed_SR_and_saving():
             if not os.path.exists(os.path.join(self.folder_path,"stacked_10m.tif")):
                 print("Stacked 10m bands not found, creating ...")
                 extract_10mbands_from_S2_folder(self.folder_path)
+            else:
+                print("Found stacked 10m bands, skipping LR stacking ...")
 
             # Get File information - 10m bands
             self.b10m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
@@ -346,6 +348,8 @@ class windowed_SR_and_saving():
             if not os.path.exists(os.path.join(self.folder_path,"stacked_20m.tif")):
                 print("Stacked 20m bands not found, creating ...")
                 extract_20mbands_from_S2_folder(self.folder_path)
+            else:
+                print("Found stacked 20m bands, skipping LR stacking ...")
 
             # Get File information - 20m bands 
             self.b20m_file_path = os.path.join(self.folder_path,"stacked_20m.tif")
