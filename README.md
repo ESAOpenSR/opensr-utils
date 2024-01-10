@@ -6,6 +6,7 @@ Funcitonalities:
 - Super-Resolution of individual patches
 - writing of georeferenced output raster
 - overlapping and averaging of patches by sleectable quantity to reduce patching artifacts
+- Processing is performed on the same device as the model that is passed to the funciton
 
 Usage example:
 ```python
@@ -56,3 +57,5 @@ For more information, this is the doctring of the only important function for no
             # delete LR stack
             sr_obj.delete_LR_stack()
 ```
+## TODo:
+- Enable multi-batch calculation of the SR. Currently, the tool only super-resolutes one image at a time (1,4,128,128)

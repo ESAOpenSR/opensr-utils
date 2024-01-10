@@ -29,6 +29,7 @@ class windowed_SR_and_saving():
             - factor (int): SR factor
             - overlap (int): Overlap of images when writing SR results to avoid patching artifacts
             - keep_lr_stack (bool): decide wether to delete the LR stack after SR is done
+            - custom_steps (int): number of steps to perform for Diffusion models
 
         Outputs:
             - None
@@ -42,9 +43,9 @@ class windowed_SR_and_saving():
             # create instance of class
             sr_obj = windowed_SR_and_saving(folder_path,keep_lr_stack=True)
             # perform super-resolution on 20m bands
-            sr_obj.start_super_resolution(band_selection="20m")
+            sr_obj.start_super_resolution(band_selection="20m",model=model,forward_call="forward",custom_steps=100)
             # perform super-resolution on 10m bands
-            sr_obj.start_super_resolution(band_selection="10m")
+            sr_obj.start_super_resolution(band_selection="10m",model=model,forward_call="forward",custom_steps=100)
             # delete LR stack
             sr_obj.delete_LR_stack()
         """
@@ -56,6 +57,7 @@ class windowed_SR_and_saving():
         self.overlap = overlap # number of pixels the windows overlap
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
+        self.custom_steps = custom_steps # number of steps to perform for Diffusion models
 
         # check that folder path exists, and that it's the correct type
         assert os.path.exists(self.folder_path), "Input folder path does not exist"
@@ -229,7 +231,7 @@ class windowed_SR_and_saving():
 
     
     
-    def super_resolute_bands(self,info_dict,model=None,forward_call="forward",custom_steps=200):
+    def super_resolute_bands(self,info_dict,model=None,forward_call="forward",custom_steps=100):
         
         """
         Super-resolutes the entire image of the class using a specified or default super-resolution model.
@@ -279,8 +281,7 @@ class windowed_SR_and_saving():
         model_sr_call = getattr(model, forward_call,custom_steps)
 
         # iterate over image batches
-        print("Super-Resoluting ...")
-        for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False):
+        for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc="Super-Resoluting"):
             # get image from S2 image
             im = self.get_window(idx,info_dict)
             # batch image
@@ -308,7 +309,7 @@ class windowed_SR_and_saving():
         # when done, save array into same directory
         print("Finished. SR image saved at",info_dict["sr_path"])
 
-    def start_super_resolution(self,band_selection="10m",model=None,forward_call="forward"):
+    def start_super_resolution(self,band_selection="10m",model=None,forward_call="forward",custom_steps=100):
         
         # assert band selection in available implemented methods
         assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"        
@@ -369,7 +370,7 @@ class windowed_SR_and_saving():
             info_dict = self.b20m_info
 
         # perform Super-resolution of the wanted bands
-        self.super_resolute_bands(info_dict,model)
+        self.super_resolute_bands(info_dict,model,custom_steps=custom_steps)
 
         # if wanted, delete LR stack
         if not self.keep_lr_stack:
