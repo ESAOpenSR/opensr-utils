@@ -16,7 +16,7 @@ from opensr_utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S
 
 class windowed_SR_and_saving():
     
-    def __init__(self, folder_path, window_size=(128, 128),keep_lr_stack=True):
+    def __init__(self, folder_path, window_size=(128, 128), factor=4, overlap=8,keep_lr_stack=True):
         """
         Class that performs windowed super-resolution on a Sentinel-2 image and saves the result. Steps:
         - Copies the 10m and 20m bands to new tiff files in the input directory.
@@ -24,9 +24,11 @@ class windowed_SR_and_saving():
         - SR Results are saved with an averaged overlap and georeferenced in the input folder.
 
         Inputs:
-            - folder_path: path to folder containing S2 SAFE data format
-            - window_size: window size of the LR image
-            - keep_lr_stack: decide wether to delete the LR stack after SR is done
+            - folder_path (string): path to folder containing S2 SAFE data format
+            - window_size (tuple): window size of the LR image
+	        - factor (int): SR factor
+	        - overlap (int): Overlap of images when writing SR results to avoid patching artifacts
+            - keep_lr_stack (bool): decide wether to delete the LR stack after SR is done
 
         Outputs:
             - None
@@ -50,8 +52,8 @@ class windowed_SR_and_saving():
         # General Settings
         self.folder_path = folder_path # path to folder containing S2 SAFE data format
         self.window_size = window_size # window size of the LR image
-        self.factor=4 # sr factor of the model
-        self.overlap=8 # number of pixels the windows overlap
+        self.factor=factor # sr factor of the model
+        self.overlap=overlap # number of pixels the windows overlap
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
 
