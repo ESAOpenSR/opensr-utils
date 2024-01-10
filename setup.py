@@ -9,7 +9,7 @@ setup(
     version='0.1.6',
     author = "Simon Donike, Cesar Aybar, Luis Gomez Chova, Freddie Kalaitzis",
     author_email = "accounts@donike.net",
-    description = "Utils supporting the ESA openst-model package for Super-Resolution of Senintel-2 Imagery",
+    description = "Utilities supporting the ESA opensr-model package for Super-Resolution of Senintel-2 Imagery",
     url = "https://isp.uv.es/opensr/",
     packages=find_packages(),
     long_description=long_description,
