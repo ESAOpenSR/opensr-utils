@@ -181,13 +181,8 @@ class windowed_SR_and_saving():
             # select bands
             data = data[info_dict["bands"],:,:]
         
-        # TRANSFORMS
-        # TODO: define proper norm/transforms. Either in model or here, but not both
-        # bring to range 0..1
-        data = data/10000
+        data = data/10000 # bring to 0..1
         data = torch.from_numpy(data)
-        # bring data to range -1..+1
-        #data = (data*2)-1
         
         # return array of window that has been read
         return(data)
