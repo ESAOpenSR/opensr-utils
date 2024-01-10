@@ -8,10 +8,10 @@ import os
 
 
 # local imports
-#from denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
-#from stretching import hq_histogram_matching
-#from utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
-#from utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S2_folder
+from opensr_utils.denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
+from opensr_utils.stretching import hq_histogram_matching
+from opensr_utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
+from opensr_utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S2_folder
 
 
 class windowed_SR_and_saving():
