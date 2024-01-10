@@ -11,6 +11,8 @@ setup(
     author_email = "accounts@donike.net",
     description = "Utilities supporting the ESA opensr-model package for Super-Resolution of Senintel-2 Imagery",
     url = "https://isp.uv.es/opensr/",
+    project_urls={'Source Code': 'https://github.com/yourusername/yourproject'},
+    license='MIT',
     packages=find_packages(),
     long_description=long_description,
     long_description_content_type='text/markdown',
