@@ -26,8 +26,8 @@ class windowed_SR_and_saving():
         Inputs:
             - folder_path (string): path to folder containing S2 SAFE data format
             - window_size (tuple): window size of the LR image
-	        - factor (int): SR factor
-	        - overlap (int): Overlap of images when writing SR results to avoid patching artifacts
+            - factor (int): SR factor
+            - overlap (int): Overlap of images when writing SR results to avoid patching artifacts
             - keep_lr_stack (bool): decide wether to delete the LR stack after SR is done
 
         Outputs:
