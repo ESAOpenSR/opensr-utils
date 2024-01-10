@@ -55,6 +55,10 @@ class windowed_SR_and_saving():
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
 
+        # check that folder path exists, and that it's the correct type
+        assert os.path.exists(self.folder_path), "Input folder path does not exist"
+        assert  self.folder_path[-5:] == ".SAFE", "Input folder path is not a Sentinel-2 .SAFE folder"
+
 
     def create_and_save_placeholder_SR_files(self,info_dict,out_name):
         """
