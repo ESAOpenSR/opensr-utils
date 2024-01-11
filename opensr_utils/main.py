@@ -12,6 +12,7 @@ from opensr_utils.denormalize_image_per_band_batch import denormalize_image_per_
 from opensr_utils.stretching import hq_histogram_matching
 from opensr_utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
 from opensr_utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S2_folder
+from opensr_utils.weighted_overlap import weighted_overlap
 
 
 class windowed_SR_and_saving():
@@ -199,7 +200,7 @@ class windowed_SR_and_saving():
         """
         Fills the SR placeholder image with the super-resoluted window at the correct location of the image. Performs windowed writing via rasterio.
         """
-        # If input nor np.array, transform to array
+        # If input not np.array, transform to array
         sr = sr.numpy() if isinstance(sr, torch.Tensor) else sr
         
         overlap = self.overlap
@@ -224,11 +225,18 @@ class windowed_SR_and_saving():
             if dst.count != sr.shape[0]:
                 #print("DST count:",dst.count," - SR bands: ",sr.shape[0])
                 raise ValueError("The number of bands in the tensor does not match the TIFF file.")
+            
+            # read data already in the placeholder image
+            placeholder_image = dst.read(window=sr_file_window)
+
+            # perform weighted average between placeholder and SR image
+            sr = weighted_overlap(sr, placeholder_image,overlap)
+
             # Write each band of the tensor to the corresponding band in the raster
             for band in range(sr.shape[0]):
                 dst.write(sr[band, :, :], band + 1, window=sr_file_window)
 
-    
+
     
     def super_resolute_bands(self,info_dict,model=None,forward_call="forward",custom_steps=100):
         
