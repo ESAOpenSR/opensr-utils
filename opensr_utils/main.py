@@ -17,7 +17,7 @@ from opensr_utils.weighted_overlap import weighted_overlap
 
 class windowed_SR_and_saving():
     
-    def __init__(self, folder_path, window_size=(128, 128), factor=4, overlap=8,keep_lr_stack=True):
+    def __init__(self, folder_path, window_size=(128, 128), factor=4, overlap=8, eliminate_border_px=10,keep_lr_stack=True):
         """
         Class that performs windowed super-resolution on a Sentinel-2 image and saves the result. Steps:
         - Copies the 10m and 20m bands to new tiff files in the input directory.
@@ -29,6 +29,7 @@ class windowed_SR_and_saving():
             - window_size (tuple): window size of the LR image
             - factor (int): SR factor
             - overlap (int): Overlap of images when writing SR results to avoid patching artifacts
+            - eliminate_border_px (int): number of pixels to eliminate at the border of the image
             - keep_lr_stack (bool): decide wether to delete the LR stack after SR is done
             - custom_steps (int): number of steps to perform for Diffusion models
 
@@ -58,6 +59,7 @@ class windowed_SR_and_saving():
         self.overlap = overlap # number of pixels the windows overlap
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
+        self.eliminate_border_px = eliminate_border_px # number of pixels to eliminate at the border of the image
 
         # check that folder path exists, and that it's the correct type
         assert os.path.exists(self.folder_path), "Input folder path does not exist"
@@ -111,6 +113,7 @@ class windowed_SR_and_saving():
         Output type is a list of rasterio.windows.Window objects.
         """
         overlap = self.overlap
+        write_window_size = self.window_size - info_dict["eliminate_border_px"]*2
         # Calculate the number of windows in each dimension
         n_windows_x = (info_dict["img_width"] - overlap) // (self.window_size[0] - overlap)
         n_windows_y = (info_dict["img_height"] - overlap) // (self.window_size[1] - overlap)
@@ -223,7 +226,6 @@ class windowed_SR_and_saving():
         with rasterio.open(info_dict["sr_path"], 'r+') as dst:
             # Check if the number of bands in the tensor matches the TIFF file
             if dst.count != sr.shape[0]:
-                #print("DST count:",dst.count," - SR bands: ",sr.shape[0])
                 raise ValueError("The number of bands in the tensor does not match the TIFF file.")
             
             # read data already in the placeholder image
@@ -310,6 +312,11 @@ class windowed_SR_and_saving():
             except:
                 pass
             
+            # if wanted, slice boder pixels
+            if info_dict["eliminate_border_px"]>0:
+                n_px = info_dict["eliminate_border_px"]
+                sr = sr[:, n_px:-n_px, n_px:-n_px]
+
             # save SR into image
             self.fill_SR_overlap(sr[0],idx,info_dict)
 
@@ -338,6 +345,7 @@ class windowed_SR_and_saving():
             self.b10m_info = {}
             self.b10m_info["lr_path"] = self.b10m_file_path
             self.b10m_info["bands"] = [0,1,2,3]
+            self.b10m_info["eliminate_border_px"] = self.eliminate_border_px
             with rasterio.open(self.b10m_file_path) as src:
                 self.b10m_info["img_width"], self.b10m_info["img_height"],self.b10m_info["dtype"] = src.width, src.height,src.dtypes[0]
                 # Extract the affine transformation matrix
@@ -364,6 +372,7 @@ class windowed_SR_and_saving():
             self.b20m_info = {}
             self.b20m_info["lr_path"] = self.b20m_file_path
             self.b20m_info["bands"] = [0,1,2,3,4,5]
+            self.b20m_info["eliminate_border_px"] = self.eliminate_border_px
             with rasterio.open(self.b20m_file_path) as src:
                 self.b20m_info["img_width"], self.b20m_info["img_height"],self.b20m_info["dtype"] = src.width, src.height, src.dtypes[0]
                 # Extract the affine transformation matrix

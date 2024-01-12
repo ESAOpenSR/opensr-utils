@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 
-def weighted_overlap(sr, placeholder,overlap):
+def weighted_overlap(sr, placeholder,overlap,hr_size=512):
 
     def calculate_distance_to_edge(height, width):
         # Create an empty array for distances
@@ -32,7 +32,7 @@ def weighted_overlap(sr, placeholder,overlap):
     overlap = overlap # define the amount of pixel overlap
     num_channels = sr.shape[0] # amount of bands
 
-    distance_to_edge = calculate_distance_to_edge(512, 512) # get distance to edge for each pixel
+    distance_to_edge = calculate_distance_to_edge(hr_size, hr_size) # get distance to edge for each pixel
     distance_to_edge[distance_to_edge > overlap] = overlap # set maximum value to overlap amount
     distance_to_edge = distance_to_edge/overlap # set weight as fraction from overlap
     distance_to_edge_inverse = 1.-distance_to_edge # set inverse factional weight for SR placeholder

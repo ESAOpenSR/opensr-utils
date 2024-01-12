@@ -9,4 +9,3 @@ sr_obj = windowed_SR_and_saving(file_path)
 sr_obj.start_super_resolution(band_selection="10m",model=None,forward_call="forward")
 # perform windowed SR - 20m
 sr_obj.start_super_resolution(band_selection="20m",model=None,forward_call="forward")
-
