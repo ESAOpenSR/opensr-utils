@@ -1,7 +1,7 @@
 # opensr-utils - Supplementary Code for the ESA OpenSR project
 
 *WARNING*  
-The pixel_overlap functionality is currently experimental. Set to 0 to disable.  
+The 'eliminate_pixel' functionality is currently experimental. Set to 0 to disable.  
   
   
 
