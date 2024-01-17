@@ -1,11 +1,17 @@
 # opensr-utils - Supplementary Code for the ESA OpenSR project
+
+*WARNING*  
+The pixel_overlap functionality is currently experimental. Set to 0 to disable.  
+  
+  
+
 This package provides useful functions to perform super-resolution of raw Sentinel-2 tiles.  
 Funcitonalities:
 - Reading and stacking of the 10 and 20m bands of Sentinel-2 '.SAFE' file format (worrks with Sen2 downloads straight out of the box)
 - Patching of input images by selectable size (eg 128x128)
 - Super-Resolution of individual patches
 - writing of georeferenced output raster
-- overlapping and averaging of patches by sleectable quantity to reduce patching artifacts
+- overlapping and averaging of patches by selectable quantity to reduce patching artifacts
 - Processing is performed on the same device as the model that is passed to the funciton
 
 Usage example:
@@ -18,9 +24,9 @@ file_path = "/yourfilepath/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729
 sr_obj = windowed_SR_and_saving(file_path) # create required class object
 
 # perform windowed SR - 10m
-sr_obj.start_super_resolution(band_selection="10m",model=None,forward_call="forward")
+sr_obj.start_super_resolution(band_selection="10m",model=None,forward_call="forward",overlap=20, eliminate_border_px=10)
 # perform windowed SR - 20m
-sr_obj.start_super_resolution(band_selection="20m",model=None,forward_call="forward")
+sr_obj.start_super_resolution(band_selection="20m",model=None,forward_call="forward",overlap=20, eliminate_border_px=10)
 ```
 To start the Super-Resolution, you need to pass a model to the 'start_super_resolution' function of the 'windowed_SR_and_saving' object.  
 If the call model to SR is different than 'forward',such as PyTorch lightnings 'predict' you can pass the name of the call as an argument.

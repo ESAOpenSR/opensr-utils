@@ -17,7 +17,7 @@ from opensr_utils.weighted_overlap import weighted_overlap
 
 class windowed_SR_and_saving():
     
-    def __init__(self, folder_path, window_size=(128, 128), factor=4, overlap=8, eliminate_border_px=10,keep_lr_stack=True):
+    def __init__(self, folder_path, window_size=(128, 128), factor=4, keep_lr_stack=True):
         """
         Class that performs windowed super-resolution on a Sentinel-2 image and saves the result. Steps:
         - Copies the 10m and 20m bands to new tiff files in the input directory.
@@ -28,8 +28,6 @@ class windowed_SR_and_saving():
             - folder_path (string): path to folder containing S2 SAFE data format
             - window_size (tuple): window size of the LR image
             - factor (int): SR factor
-            - overlap (int): Overlap of images when writing SR results to avoid patching artifacts
-            - eliminate_border_px (int): number of pixels to eliminate at the border of the image
             - keep_lr_stack (bool): decide wether to delete the LR stack after SR is done
             - custom_steps (int): number of steps to perform for Diffusion models
 
@@ -56,10 +54,8 @@ class windowed_SR_and_saving():
         self.folder_path = folder_path # path to folder containing S2 SAFE data format
         self.window_size = window_size # window size of the LR image
         self.factor = factor # sr factor of the model
-        self.overlap = overlap # number of pixels the windows overlap
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
-        self.eliminate_border_px = eliminate_border_px # number of pixels to eliminate at the border of the image
 
         # check that folder path exists, and that it's the correct type
         assert os.path.exists(self.folder_path), "Input folder path does not exist"
@@ -112,8 +108,9 @@ class windowed_SR_and_saving():
         Creates a list of window coordinates for the input image. The windows overlap by a specified amount.
         Output type is a list of rasterio.windows.Window objects.
         """
-        overlap = self.overlap
-        write_window_size = self.window_size - info_dict["eliminate_border_px"]*2
+        # get amount of overlap
+        overlap = info_dict["overlap"]
+        
         # Calculate the number of windows in each dimension
         n_windows_x = (info_dict["img_width"] - overlap) // (self.window_size[0] - overlap)
         n_windows_y = (info_dict["img_height"] - overlap) // (self.window_size[1] - overlap)
@@ -205,8 +202,6 @@ class windowed_SR_and_saving():
         """
         # If input not np.array, transform to array
         sr = sr.numpy() if isinstance(sr, torch.Tensor) else sr
-        
-        overlap = self.overlap
 
         # Get coor of idx window, create new rasterio Windoow in which it should be saved
         current_window = info_dict["window_coordinates"][idx]
@@ -232,12 +227,14 @@ class windowed_SR_and_saving():
             placeholder_image = dst.read(window=sr_file_window)
 
             # perform weighted average between placeholder and SR image
-            sr = weighted_overlap(sr, placeholder_image,overlap)
+            sr = weighted_overlap(sr=sr, placeholder=placeholder_image,
+                                  overlap=info_dict["overlap"], 
+                                  pixels_eliminate=info_dict["eliminate_border_px"],
+                                  hr_size=sr.shape[-1])
 
             # Write each band of the tensor to the corresponding band in the raster
             for band in range(sr.shape[0]):
                 dst.write(sr[band, :, :], band + 1, window=sr_file_window)
-
 
     
     def super_resolute_bands(self,info_dict,model=None,forward_call="forward",custom_steps=100):
@@ -306,24 +303,19 @@ class windowed_SR_and_saving():
             # super-resolute image
             sr = model_sr_call(im,custom_steps=custom_steps)
 
-            # try to move to CPu
+            # try to move to CPU, might be already on CPU in some cases, therefore try catch block
             try:
                 sr = sr.detach().cpu()
             except:
                 pass
             
-            # if wanted, slice boder pixels
-            if info_dict["eliminate_border_px"]>0:
-                n_px = info_dict["eliminate_border_px"]
-                sr = sr[:, n_px:-n_px, n_px:-n_px]
-
             # save SR into image
             self.fill_SR_overlap(sr[0],idx,info_dict)
 
         # when done, save array into same directory
         print("Finished. SR image saved at",info_dict["sr_path"])
 
-    def start_super_resolution(self,band_selection="10m",model=None,forward_call="forward",custom_steps=100):
+    def start_super_resolution(self,band_selection="10m",model=None, forward_call="forward", custom_steps=100, overlap=8, eliminate_border_px=0):
         
         # assert band selection in available implemented methods
         assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"        
@@ -345,7 +337,8 @@ class windowed_SR_and_saving():
             self.b10m_info = {}
             self.b10m_info["lr_path"] = self.b10m_file_path
             self.b10m_info["bands"] = [0,1,2,3]
-            self.b10m_info["eliminate_border_px"] = self.eliminate_border_px
+            self.b10m_info["eliminate_border_px"] = eliminate_border_px
+            self.b10m_info["overlap"] = overlap
             with rasterio.open(self.b10m_file_path) as src:
                 self.b10m_info["img_width"], self.b10m_info["img_height"],self.b10m_info["dtype"] = src.width, src.height,src.dtypes[0]
                 # Extract the affine transformation matrix
@@ -372,7 +365,8 @@ class windowed_SR_and_saving():
             self.b20m_info = {}
             self.b20m_info["lr_path"] = self.b20m_file_path
             self.b20m_info["bands"] = [0,1,2,3,4,5]
-            self.b20m_info["eliminate_border_px"] = self.eliminate_border_px
+            self.b20m_info["eliminate_border_px"] = eliminate_border_px
+            self.b20m_info["overlap"] = overlap
             with rasterio.open(self.b20m_file_path) as src:
                 self.b20m_info["img_width"], self.b20m_info["img_height"],self.b20m_info["dtype"] = src.width, src.height, src.dtypes[0]
                 # Extract the affine transformation matrix
@@ -386,7 +380,7 @@ class windowed_SR_and_saving():
             info_dict = self.b20m_info
 
         # perform Super-resolution of the wanted bands
-        self.super_resolute_bands(info_dict,model,custom_steps=custom_steps)
+        self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
 
         # if wanted, delete LR stack
         if not self.keep_lr_stack:
