@@ -17,7 +17,7 @@ from opensr_utils.weighted_overlap import weighted_overlap
 
 class windowed_SR_and_saving():
     
-    def __init__(self, folder_path, window_size=(128, 128), factor=4, keep_lr_stack=True):
+    def __init__(self, folder_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="SR"):
         """
         Class that performs windowed super-resolution on a Sentinel-2 image and saves the result. Steps:
         - Copies the 10m and 20m bands to new tiff files in the input directory.
@@ -49,6 +49,8 @@ class windowed_SR_and_saving():
             # delete LR stack
             sr_obj.delete_LR_stack()
         """
+        assert mode in ["SR","xAI"], "mode not in ['SR','xAI']"
+
 
         # General Settings
         self.folder_path = folder_path # path to folder containing S2 SAFE data format
@@ -56,6 +58,7 @@ class windowed_SR_and_saving():
         self.factor = factor # sr factor of the model
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
+        self.mode = mode
 
         # check that folder path exists, and that it's the correct type
         assert os.path.exists(self.folder_path), "Input folder path does not exist"
@@ -348,7 +351,8 @@ class windowed_SR_and_saving():
             
             # call local functions: get windxw coordinates and create placeholder SR file
             self.b10m_info["window_coordinates"] = self.create_window_coordinates_overlap(self.b10m_info)
-            self.b10m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b10m_info,out_name="SR_10mbands.tif")
+            out_name = str(self.mode+"_10mbands.tiff")
+            self.b10m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b10m_info,out_name=out_name)
             info_dict = self.b10m_info
         
         
@@ -376,11 +380,23 @@ class windowed_SR_and_saving():
 
             # call local functions: get windxw coordinates and create placeholder SR file
             self.b20m_info["window_coordinates"] = self.create_window_coordinates_overlap(self.b20m_info)
-            self.b20m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b20m_info,out_name="SR_20mbands.tif")
+            out_name = str(self.mode+"_20mbands.tiff")
+            self.b20m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b20m_info,out_name=out_name)
             info_dict = self.b20m_info
 
         # perform Super-resolution of the wanted bands
-        self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
+        if self.mode=="SR":
+            self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
+        if self.mode=="xAI":
+            print("performing xAI CRPS Analysis")
+            pickle_path = os.path.join(self.folder_path,"crps_list_"+band_selection+".pickle")
+            from opensr_utils.xAI_utils import sr_probabilities
+            crps_ls = sr_probabilities(self,info_dict,pickle_path=pickle_path,model=model,forward_call=forward_call,custom_steps=100)
+            # save list to pickle file
+            import pickle
+            with open(pickle_path, 'wb') as handle:
+                pickle.dump(crps_ls, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            print("CPRS Scores saved in",os.path.join(self.folder_path,"crps_list_10m.pickle"))
 
         # if wanted, delete LR stack
         if not self.keep_lr_stack:
@@ -391,7 +407,8 @@ if __name__ == "__main__":
             
     folder_path = "/data2/simon/test_s2/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729T134559.SAFE/"
 
-    sr_obj = windowed_SR_and_saving(folder_path,keep_lr_stack=True)
+    sr_obj = windowed_SR_and_saving(folder_path,keep_lr_stack=True,mode="xAI")
 
     sr_obj.start_super_resolution(band_selection="20m")
     sr_obj.start_super_resolution(band_selection="10m")
+

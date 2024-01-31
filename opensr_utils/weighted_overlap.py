@@ -196,4 +196,4 @@ def weighted_overlap(sr, placeholder,overlap=8,pixels_eliminate=0,hr_size=512):
     # perform weighting
     weighted_image = (weights*im) + (weights_inverse*ph)
 
-    return weighted_image#weighted_image
+    return weighted_image
