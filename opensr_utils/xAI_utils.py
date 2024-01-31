@@ -79,7 +79,7 @@ def sr_probabilities(self,info_dict,pickle_path,model=None,forward_call="forward
             # super-resolute image
             # set holders for multiple srs
             sr_probs = []
-            for r in range(20):
+            for r in range(10):
                 sr = model_sr_call(im,custom_steps=custom_steps)
                 try:
                     sr = sr.cpu()
