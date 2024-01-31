@@ -93,7 +93,7 @@ def sr_probabilities(self,info_dict,pickle_path,model=None,forward_call="forward
             # get crps
             im = im.squeeze()
             sr_probs = sr_probs.squeeze()
-            crps = calculate_crps_for_tensors(im,sr_probs)
+            crps = calculate_crps_for_tensors(im.cpu().numpy(),sr_probs.cpu().numpy())
 
             # append result to list
             crps_list.append(crps.mean())
