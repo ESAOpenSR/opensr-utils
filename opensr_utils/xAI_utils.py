@@ -81,6 +81,10 @@ def sr_probabilities(self,info_dict,pickle_path,model=None,forward_call="forward
             sr_probs = []
             for r in range(20):
                 sr = model_sr_call(im,custom_steps=custom_steps)
+                try:
+                    sr = sr.cpu()
+                except:
+                    pass
                 sr_probs.append(sr)
             sr_probs = torch.stack(sr_probs) # turn to tensor
 
