@@ -56,7 +56,7 @@ def weighted_overlap(sr, placeholder,overlap=10,pixels_eliminate=0,hr_size=512):
         right_valid = ph_validity_mask[0, half_pixel, -1] > 0.5
         top_valid = ph_validity_mask[0, 0, half_pixel] > 0.5
         bottom_valid = ph_validity_mask[0, -1, half_pixel] > 0.5
-        print("Cardinalities valid (L-R-T-B):",left_valid,right_valid,top_valid,bottom_valid)
+        #print("Cardinalities valid (L-R-T-B):",left_valid,right_valid,top_valid,bottom_valid)
         
         if left_valid:
             left_pad = pixels_eliminate
@@ -85,7 +85,7 @@ def weighted_overlap(sr, placeholder,overlap=10,pixels_eliminate=0,hr_size=512):
         if top_valid and bottom_valid:
             top_pad = pixels_eliminate//2
             bottom_pad = pixels_eliminate//2
-        print("Pad amounts per cardinality (L-R-T-B):",left_pad,right_pad,top_pad,bottom_pad)
+        #print("Pad amounts per cardinality (L-R-T-B):",left_pad,right_pad,top_pad,bottom_pad)
             
         # if none is valid, interpolate mask back to original dimensions without padding
         if True not in [left_valid,right_valid,top_valid,bottom_valid]:
@@ -175,8 +175,8 @@ def weighted_overlap(sr, placeholder,overlap=10,pixels_eliminate=0,hr_size=512):
     weights = np.nan_to_num(weights)
     weights_inverse =  np.nan_to_num(weights_inverse)
     
-    assert np.all(weights+weights_inverse)==True, "weights dont sum um to 1. for every single pixel. Abort."
+    assert np.all(weights+weights_inverse)==1., "weights dont sum um to 1. for every single pixel. Abort."
     # perform weighting
     weighted_image = (weights*im) + (weights_inverse*ph)
 
-    return(weights)
+    return(weighted_image)

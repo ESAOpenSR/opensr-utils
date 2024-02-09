@@ -8,5 +8,5 @@ sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, kee
 # perform windowed SR - 10m
 #sr_obj.start_super_resolution(band_selection="10m",model=None,forward_call="forward",overlap=20, eliminate_border_px=0)
 # perform windowed SR - 20m
-sr_obj.start_super_resolution(band_selection="20m",model=None,forward_call="forward",overlap=20, eliminate_border_px=10)
+sr_obj.start_super_resolution(band_selection="20m",model=None,forward_call="forward",overlap=40, eliminate_border_px=10)
 
