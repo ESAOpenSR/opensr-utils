@@ -315,11 +315,8 @@ class windowed_SR_and_saving():
         # when done, save array into same directory
         print("Finished. SR image saved at",info_dict["sr_path"])
 
-    def start_super_resolution(self,band_selection="10m",model=None, forward_call="forward", custom_steps=100, overlap=8, eliminate_border_px=0):
-        
-        # assert band selection in available implemented methods
-        assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"        
-
+    
+    def initialize_info_dicts(self,band_selection="10m",overlap=8, eliminate_border_px=0):
         # select info dictionary:
         # 1 .Get file info from Rasterio
         # 2. Create window coordinates for selected bands
@@ -351,6 +348,7 @@ class windowed_SR_and_saving():
             out_name = str("SR"+"_10mbands.tif")
             self.b10m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b10m_info,out_name=out_name)
             info_dict = self.b10m_info
+            return(info_dict)
         
         
         if band_selection=="20m":
@@ -380,6 +378,14 @@ class windowed_SR_and_saving():
             out_name = str("SR"+"_20mbands.tif")
             self.b20m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b20m_info,out_name=out_name)
             info_dict = self.b20m_info
+            return(info_dict)
+
+    
+    def start_super_resolution(self,band_selection="10m",model=None, forward_call="forward", custom_steps=100, overlap=8, eliminate_border_px=0):
+        # TODO: then, profit from these settings from the PL dataset class
+        # assert band selection in available implemented methods
+        assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"    
+        info_dict = self.initialize_info_dicts(band_selection="10m",overlap=8, eliminate_border_px=0)    
 
         # perform Super-resolution of the wanted bands
         self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
@@ -388,6 +394,42 @@ class windowed_SR_and_saving():
         if not self.keep_lr_stack:
             self.delete_LR_stack(info_dict)
 
+from torch.utils.data import Dataset, DataLoader
+class windowed_SR_and_saving_dataset(Dataset):
+    """
+    This wraps aroudn the object class to profit from
+    the multi-threaded approach of Lightning and to 
+    embedd it in the workflow with a PL SR model.
+    """
+    def __init__(self, folder_path, band_selection="10m",
+                 overlap=20,eliminate_border_px=10,
+                 window_size=(128, 128), factor=4,keep_lr_stack=True):
+        # create object
+        self.sr_obj = windowed_SR_and_saving(folder_path, window_size=(128, 128),
+                                             factor=4, keep_lr_stack=True)
+        # initialze information
+        self.info_dict = self.sr_obj.initialize_info_dicts(band_selection=band_selection,
+                                          overlap=8,
+                                          eliminate_border_px=0) 
+        
+        # 
+
+    def __len__(self):
+        return(len(self.info_dict["window_coordinates"]))
+    
+    def __getitem__(self,idx):
+        im = self.sr_obj.get_window(idx,self.info_dict)
+        im = im.float()
+        return(im)
+
+
+# logic to create PyTorch Dataset and DataLoader for this dataset object
+if __name__ == "__main__":
+    folder_path = "/data2/simon/test_s2/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729T134559.SAFE/"
+    ds = windowed_SR_and_saving_dataset(folder_path=folder_path, band_selection="10m",
+                    overlap=20,eliminate_border_px=10,
+                    window_size=(128, 128), factor=4,keep_lr_stack=True)
+    dl = DataLoader(ds,batch_size=10,shuffle=False)
 
 if __name__ == "__main__":
             
@@ -395,6 +437,6 @@ if __name__ == "__main__":
 
     sr_obj = windowed_SR_and_saving(folder_path,keep_lr_stack=True,mode="xAI")
 
-    sr_obj.start_super_resolution(band_selection="20m")
-    sr_obj.start_super_resolution(band_selection="10m")
+    #sr_obj.start_super_resolution(band_selection="20m")
+    #sr_obj.start_super_resolution(band_selection="10m")
 
