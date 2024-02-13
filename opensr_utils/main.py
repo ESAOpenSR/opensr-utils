@@ -346,12 +346,30 @@ class windowed_SR_and_saving():
         # 2. Create window coordinates for selected bands
         # 3. Create and save placeholder SR file
         if band_selection=="10m":
-            # if it doesnt exist, create stacked LR images
-            if not os.path.exists(os.path.join(self.folder_path,"stacked_10m.tif")):
-                print("Stacked 10m bands not found, creating ...")
-                extract_10mbands_from_S2_folder(self.folder_path)
-            else:
-                print("Found stacked 10m bands, skipping LR stacking ...")
+
+            # work with file lock in order to not do this multiple times during Multi-GPU inference
+            # Attempt to acquire an exclusive lock on a temporary lock file
+            import os
+            import fcntl
+            stack_output_path = os.path.join(self.folder_path,"stacked_10m.tif")
+            lock_file_path = stack_output_path + ".lock"
+            with open(lock_file_path, 'w') as lock_file:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # This block now runs only in the process that acquired the lock
+                    if os.path.exists(stack_output_path): # remove file if it exists
+                        os.remove(stack_output_path)
+                        print("Overwriting existing placeholder file...")
+                    if not os.path.exists(stack_output_path): # create file
+                        # FILE CREATION LOGIC -----------------------------------------------------------------------
+                        print("Creating stacked 10m bands file ...")
+                        extract_10mbands_from_S2_folder(self.folder_path)
+                        # END FILE CREATION LOGIC -------------------------------------------------------------------
+                    fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
+                except IOError:
+                    # Another process has the lock; skip file creation
+                    pass
+
 
             # Get File information - 10m bands
             self.b10m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
@@ -376,12 +394,28 @@ class windowed_SR_and_saving():
         
         
         if band_selection=="20m":
-            # if it doesnt exist, create stacked LR images
-            if not os.path.exists(os.path.join(self.folder_path,"stacked_20m.tif")):
-                print("Stacked 20m bands not found, creating ...")
-                extract_20mbands_from_S2_folder(self.folder_path)
-            else:
-                print("Found stacked 20m bands, skipping LR stacking ...")
+            # work with file lock in order to not do this multiple times during Multi-GPU inference
+            # Attempt to acquire an exclusive lock on a temporary lock file
+            import os
+            import fcntl
+            stack_output_path = os.path.join(self.folder_path,"stacked_20m.tif")
+            lock_file_path = stack_output_path + ".lock"
+            with open(lock_file_path, 'w') as lock_file:
+                try:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    # This block now runs only in the process that acquired the lock
+                    if os.path.exists(stack_output_path): # remove file if it exists
+                        os.remove(stack_output_path)
+                        print("Overwriting existing placeholder file...")
+                    if not os.path.exists(stack_output_path): # create file
+                        # FILE CREATION LOGIC -----------------------------------------------------------------------
+                        print("Creating stacked 20m bands file ...")
+                        extract_20mbands_from_S2_folder(self.folder_path)
+                        # END FILE CREATION LOGIC -------------------------------------------------------------------
+                    fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
+                except IOError:
+                    # Another process has the lock; skip file creation
+                    pass
 
             # Get File information - 20m bands 
             self.b20m_file_path = os.path.join(self.folder_path,"stacked_20m.tif")
@@ -429,12 +463,12 @@ class windowed_SR_and_saving_dataset(Dataset):
                  overlap=20,eliminate_border_px=10,
                  window_size=(128, 128), factor=4,keep_lr_stack=True):
         # create object
-        self.sr_obj = windowed_SR_and_saving(folder_path, window_size=(128, 128),
-                                             factor=4, keep_lr_stack=True)
+        self.sr_obj = windowed_SR_and_saving(folder_path, window_size=window_size,
+                                             factor=factor, keep_lr_stack=keep_lr_stack)
         # initialze information
         self.info_dict = self.sr_obj.initialize_info_dicts(band_selection=band_selection,
-                                          overlap=8,
-                                          eliminate_border_px=0) 
+                                          overlap=overlap,
+                                          eliminate_border_px=eliminate_border_px) 
         
         # 
 
@@ -450,9 +484,9 @@ class windowed_SR_and_saving_dataset(Dataset):
 # logic to create PyTorch Dataset and DataLoader for this dataset object
 if __name__ == "__main__":
     folder_path = "/data2/simon/test_s2/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729T134559.SAFE/"
-    ds = windowed_SR_and_saving_dataset(folder_path=folder_path, band_selection="10m",
+    ds = windowed_SR_and_saving_dataset(folder_path=folder_path, band_selection="20m",
                     overlap=20,eliminate_border_px=10,
-                    window_size=(128, 128), factor=4,keep_lr_stack=True)
+                    window_size=(128, 128), factor=4,keep_lr_stack=False)
     dl = DataLoader(ds,batch_size=10,shuffle=False)
 
 if __name__ == "__main__":

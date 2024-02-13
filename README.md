@@ -1,10 +1,16 @@
 # opensr-utils - Supplementary Code for the ESA OpenSR project
 
 *WARNING*  
-The 'eliminate_pixel' functionality is currently experimental. Set to 0 to disable.  
+The 'eliminate_pixel' functionality is currently experimental and can in some cases return unexpected results.  
+Only the combination of overlap:40 and eliminate_pixel:20 is proven to work. Set to 0 to disable.  
   
   
 
+
+*UPDATE*  
+The current version supports PyTorch Lightning multi-GPU inference, but the documentation hasnt updated yet.
+  
+  
 This package provides useful functions to perform super-resolution of raw Sentinel-2 tiles.  
 Funcitonalities:
 - Reading and stacking of the 10 and 20m bands of Sentinel-2 '.SAFE' file format (worrks with Sen2 downloads straight out of the box)
