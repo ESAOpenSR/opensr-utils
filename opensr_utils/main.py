@@ -358,9 +358,10 @@ class windowed_SR_and_saving():
                     fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     # This block now runs only in the process that acquired the lock
                     if os.path.exists(stack_output_path): # remove file if it exists
-                        os.remove(stack_output_path)
-                        print("Overwriting existing placeholder file...")
-                    if not os.path.exists(stack_output_path): # create file
+                        pass
+                        #os.remove(stack_output_path)
+                        #print("Overwriting existing 10 bands file...")
+                    else: # create file
                         # FILE CREATION LOGIC -----------------------------------------------------------------------
                         print("Creating stacked 10m bands file ...")
                         extract_10mbands_from_S2_folder(self.folder_path)
@@ -405,9 +406,10 @@ class windowed_SR_and_saving():
                     fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     # This block now runs only in the process that acquired the lock
                     if os.path.exists(stack_output_path): # remove file if it exists
-                        os.remove(stack_output_path)
-                        print("Overwriting existing placeholder file...")
-                    if not os.path.exists(stack_output_path): # create file
+                        pass
+                        #os.remove(stack_output_path)
+                        #print("Overwriting existing 20m bands  file...")
+                    else:
                         # FILE CREATION LOGIC -----------------------------------------------------------------------
                         print("Creating stacked 20m bands file ...")
                         extract_20mbands_from_S2_folder(self.folder_path)
