@@ -93,12 +93,36 @@ class windowed_SR_and_saving():
         'transform': save_transform,  # Adjust as needed
                 }
 
-        # Create and write SR placeholder to the raster file
-        with rasterio.open(os.path.join(self.folder_path,out_name), 'w', **meta) as dst:
-            # Assuming 'your_array' is 2D, write it to the first band
-            for band in range(sr_tensor_placeholder.shape[0]):
-                dst.write(sr_tensor_placeholder[band, :, :], band + 1)
-        print("Saved empty placeholder SR image at: ",os.path.join(self.folder_path,out_name))
+
+        # work with file lock in order to not do this multiple times during Multi-GPU inference
+        # Attempt to acquire an exclusive lock on a temporary lock file
+        import os
+        import fcntl
+        output_file_path = os.path.join(self.folder_path,out_name)
+        lock_file_path = output_file_path + ".lock"
+        with open(lock_file_path, 'w') as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # This block now runs only in the process that acquired the lock
+                if os.path.exists(output_file_path): # remove file if it exists
+                    os.remove(output_file_path)
+                    print("Overwriting existing placeholder file...")
+                if not os.path.exists(output_file_path): # create file
+                    # FILE CREATION LOGIC -----------------------------------------------------------------------
+                    # Create and write SR placeholder to the raster file
+                    with rasterio.open(os.path.join(self.folder_path,out_name), 'w', **meta) as dst:
+                        # Assuming 'your_array' is 2D, write it to the first band
+                        for band in range(sr_tensor_placeholder.shape[0]):
+                            dst.write(sr_tensor_placeholder[band, :, :], band + 1)
+                    print("Saved empty placeholder SR image at: ",os.path.join(self.folder_path,out_name))
+                    # END FILE CREATION LOGIC -------------------------------------------------------------------
+                fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
+            except IOError:
+                # Another process has the lock; skip file creation
+                pass
+        # delete the lock file
+        #os.remove(lock_file_path)
+
         # return file path of placeholder
         return os.path.join(self.folder_path,out_name)
         
