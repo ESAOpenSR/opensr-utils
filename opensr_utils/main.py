@@ -59,8 +59,7 @@ class windowed_SR_and_saving():
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
 
         # check that folder path exists, and that it's the correct type
-        assert os.path.exists(self.folder_path), "Input folder path does not exist"
-        assert self.folder_path.replace("/","")[-5:] == ".SAFE", "Input folder path is not a Sentinel-2 .SAFE folder"
+        assert os.path.exists(self.folder_path), "Input folder/file path does not exist"
 
 
     def create_and_save_placeholder_SR_files(self,info_dict,out_name):
@@ -346,35 +345,51 @@ class windowed_SR_and_saving():
         # 1 .Get file info from Rasterio
         # 2. Create window coordinates for selected bands
         # 3. Create and save placeholder SR file
+
+        # check wether input is in .SAFE format or is traight to file
+        if self.folder_path.replace("/","")[-5:] == ".SAFE":
+            safe_format = True
+        else:
+            safe_format = False
+            from opensr_utils.utils import can_read_directly_with_rasterio
+            assert can_read_directly_with_rasterio(self.folder_path) == True
+
+
         if band_selection=="10m":
 
-            # work with file lock in order to not do this multiple times during Multi-GPU inference
-            # Attempt to acquire an exclusive lock on a temporary lock file
-            import os
-            import fcntl
-            stack_output_path = os.path.join(self.folder_path,"stacked_10m.tif")
-            lock_file_path = stack_output_path + ".lock"
-            with open(lock_file_path, 'w') as lock_file:
-                try:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    # This block now runs only in the process that acquired the lock
-                    if os.path.exists(stack_output_path): # remove file if it exists
+            # If Safe format, perform band extraction ect
+            if safe_format:
+                # work with file lock in order to not do this multiple times during Multi-GPU inference
+                # Attempt to acquire an exclusive lock on a temporary lock file
+                import os
+                import fcntl
+                stack_output_path = os.path.join(self.folder_path,"stacked_10m.tif")
+                lock_file_path = stack_output_path + ".lock"
+                with open(lock_file_path, 'w') as lock_file:
+                    try:
+                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        # This block now runs only in the process that acquired the lock
+                        if os.path.exists(stack_output_path): # remove file if it exists
+                            pass
+                            #os.remove(stack_output_path)
+                            #print("Overwriting existing 10 bands file...")
+                        else: # create file
+                            # FILE CREATION LOGIC -----------------------------------------------------------------------
+                            print("Creating stacked 10m bands file ...")
+                            extract_10mbands_from_S2_folder(self.folder_path)
+                            # END FILE CREATION LOGIC -------------------------------------------------------------------
+                        fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
+                    except IOError:
+                        # Another process has the lock; skip file creation
                         pass
-                        #os.remove(stack_output_path)
-                        #print("Overwriting existing 10 bands file...")
-                    else: # create file
-                        # FILE CREATION LOGIC -----------------------------------------------------------------------
-                        print("Creating stacked 10m bands file ...")
-                        extract_10mbands_from_S2_folder(self.folder_path)
-                        # END FILE CREATION LOGIC -------------------------------------------------------------------
-                    fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
-                except IOError:
-                    # Another process has the lock; skip file creation
-                    pass
+                self.b10m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
+            if safe_format==False:
+                self.b10m_file_path = os.path.join(self.folder_path)
+
 
 
             # Get File information - 10m bands
-            self.b10m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
+            
             self.b10m_info = {}
             self.b10m_info["lr_path"] = self.b10m_file_path
             self.b10m_info["bands"] = [0,1,2,3]
@@ -394,31 +409,37 @@ class windowed_SR_and_saving():
             info_dict = self.b10m_info
             return(info_dict)
         
-        
+        # for 20m case
         if band_selection=="20m":
-            # work with file lock in order to not do this multiple times during Multi-GPU inference
-            # Attempt to acquire an exclusive lock on a temporary lock file
-            import os
-            import fcntl
-            stack_output_path = os.path.join(self.folder_path,"stacked_20m.tif")
-            lock_file_path = stack_output_path + ".lock"
-            with open(lock_file_path, 'w') as lock_file:
-                try:
-                    fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    # This block now runs only in the process that acquired the lock
-                    if os.path.exists(stack_output_path): # remove file if it exists
+            if safe_format:
+                # work with file lock in order to not do this multiple times during Multi-GPU inference
+                # Attempt to acquire an exclusive lock on a temporary lock file
+                import os
+                import fcntl
+                stack_output_path = os.path.join(self.folder_path,"stacked_20m.tif")
+                lock_file_path = stack_output_path + ".lock"
+                with open(lock_file_path, 'w') as lock_file:
+                    try:
+                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        # This block now runs only in the process that acquired the lock
+                        if os.path.exists(stack_output_path): # remove file if it exists
+                            pass
+                            #os.remove(stack_output_path)
+                            #print("Overwriting existing 20m bands  file...")
+                        else:
+                            # FILE CREATION LOGIC -----------------------------------------------------------------------
+                            print("Creating stacked 20m bands file ...")
+                            extract_20mbands_from_S2_folder(self.folder_path)
+                            # END FILE CREATION LOGIC -------------------------------------------------------------------
+                        fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
+                    except IOError:
+                        # Another process has the lock; skip file creation
                         pass
-                        #os.remove(stack_output_path)
-                        #print("Overwriting existing 20m bands  file...")
-                    else:
-                        # FILE CREATION LOGIC -----------------------------------------------------------------------
-                        print("Creating stacked 20m bands file ...")
-                        extract_20mbands_from_S2_folder(self.folder_path)
-                        # END FILE CREATION LOGIC -------------------------------------------------------------------
-                    fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
-                except IOError:
-                    # Another process has the lock; skip file creation
-                    pass
+                self.b20m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
+            if safe_format==False:
+                self.b20m_file_path = os.path.join(self.folder_path)
+
+
 
             # Get File information - 20m bands 
             self.b20m_file_path = os.path.join(self.folder_path,"stacked_20m.tif")
