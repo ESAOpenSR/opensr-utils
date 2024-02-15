@@ -2,6 +2,7 @@ import torch
 import torch
 import os
 from pytorch_lightning.callbacks import BasePredictionWriter
+from tqdm import tqdm
 
 def predict_pl_workflow(input_file,model,**kwargs):
     band_selection = kwargs.get('band_selection', "20m")

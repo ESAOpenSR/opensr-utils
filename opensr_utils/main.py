@@ -449,8 +449,7 @@ class windowed_SR_and_saving():
         info_dict = self.initialize_info_dicts(band_selection="10m",overlap=8, eliminate_border_px=0)    
 
         # If model is a torch.nn.Module, do 1-batch SR with patching on the fly
-        model_type = type(model)
-        if model_type is LightningModule:
+        if isinstance(model, LightningModule):
             from pl_utils import predict_pl_workflow
             args = {
                 "band_selection": band_selection,
@@ -464,7 +463,7 @@ class windowed_SR_and_saving():
                 "strategy": "ddp",
                 "custom_steps": custom_steps}
             predict_pl_workflow(input_file=self.folder_path,model=model,**args)
-        if model_type is torch.nn.Module:
+        elif isinstance(model, torch.nn.Module):
             print("Model is torch.NN.Module, performing 1-batched inference with patching on the fly. For faster inference, provide a PyTorch Lightning module.")
             self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
         else:
