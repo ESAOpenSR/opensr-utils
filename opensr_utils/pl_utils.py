@@ -36,7 +36,7 @@ def predict_pl_workflow(input_file,model,**kwargs):
 
     # create Trainer - here for initialization of multi-GPU processing
     from pytorch_lightning import Trainer
-    trainer = Trainer(accelerator=accelerator, devices=devices,strategy=strategy,callbacks=[writer_callback])
+    trainer = Trainer(accelerator=accelerator, devices=devices,strategy=strategy,callbacks=[writer_callback],logger=False)
 
     # initialize models
     device = "cuda" if torch.cuda.is_available() else "cpu"

@@ -450,7 +450,7 @@ class windowed_SR_and_saving():
 
         # If model is a torch.nn.Module, do 1-batch SR with patching on the fly
         if isinstance(model, LightningModule):
-            from pl_utils import predict_pl_workflow
+            from opensr_utils.pl_utils import predict_pl_workflow
             args = {
                 "band_selection": band_selection,
                 "overlap": overlap,
