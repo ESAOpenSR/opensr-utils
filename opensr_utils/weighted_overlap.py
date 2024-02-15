@@ -175,8 +175,19 @@ def weighted_overlap(sr, placeholder,overlap=10,pixels_eliminate=0,hr_size=512):
     weights = np.nan_to_num(weights)
     weights_inverse =  np.nan_to_num(weights_inverse)
     
-    assert np.all(weights+weights_inverse)==1., "weights dont sum um to 1. for every single pixel. Abort."
+    
+    try:
+        assert np.all(weights+weights_inverse)==1., "weights dont sum um to 1. for every single pixel. Abort."
+    except AssertionError:
+        import warnings
+        warnings.warn("Weight matrix in valid in weighted overlap. Returning zero tensor.", UserWarning)
+    
     # perform weighting
-    weighted_image = (weights*im) + (weights_inverse*ph)
-
-    return(weighted_image)
+    try:
+        weighted_image = (weights*im) + (weights_inverse*ph)
+        return(weighted_image)
+    except:
+        import warnings
+        warnings.warn("Weighted overlap failed due to weight dimensions. Returning zero tensor.", UserWarning)
+        return(torch.zeros_like(sr))
+    

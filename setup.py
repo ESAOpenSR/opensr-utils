@@ -22,5 +22,6 @@ setup(
 	'rasterio==1.3.6',
 	'tqdm==4.64.1',
 	'torch==1.13.1',
-	'scikit-image==0.19.3'],
+	'scikit-image==0.19.3',
+        'pytorch-lightning==1.9.0'],
 )
