@@ -114,13 +114,15 @@ class CustomWriter(BasePredictionWriter):
             
             # delete temporary folder and all its contents
             # Make sure the path exists and is a directory
-            if False: #os.path.isdir(self.temp_path):
-                import time
-                import shutil
-                time.sleep(10)
-                # Remove the folder and all its contents
-                shutil.rmtree(self.temp_path)
-                print(f"Data written to disk, temp folder deleted. Finished.")
+            if os.path.isdir(self.temp_path):
+                try:
+                    import time
+                    import shutil
+                    time.sleep(5)
+                    shutil.rmtree(self.temp_path)
+                    print("Data written to SR output, temp folder deleted. Finished.")
+                except:
+                    print("Data written to SR output, temp folder not deleted due to Error in deletion process.")
             else:
-                print(f"Data written to disk, temp folder not deleted.")
+                print("Data written to SR output, temp folder not deleted.")
             return None

@@ -297,15 +297,15 @@ class windowed_SR_and_saving():
         """
         # Get interpolation model if model not specified
         if model==None:
-            # Create SR mock-up
-            class sr_model():
-                def __init__(self,custom_steps=200):
-                    self.device="cpu"
-                    pass
-                def forward(self,lr,custom_steps=200):
-                    sr = torch.nn.functional.interpolate(lr, size=(512, 512), mode='bilinear', align_corners=False)
-                    return(sr)
-            model = sr_model()
+            class SRModelPL(LightningModule): # placeholder interpolation model for testing
+                def __init__(self):
+                    super(SRModelPL, self).__init__()
+                def forward(self, x, custom_steps=100):
+                    sr = torch.nn.functional.interpolate(x, size=(512, 512), mode='nearest')
+                    return sr
+                def predict(self,x,custom_steps=100):
+                    return self.forward(x)
+            model = SRModelPL()
             
         # allow custom defined forward/SR call on model
         model_sr_call = getattr(model, forward_call,custom_steps)
@@ -467,7 +467,7 @@ class windowed_SR_and_saving():
         # TODO: then, profit from these settings from the PL dataset class
         # assert band selection in available implemented methods
         assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"    
-        info_dict = self.initialize_info_dicts(band_selection="10m",overlap=8, eliminate_border_px=0)    
+        info_dict = self.initialize_info_dicts(band_selection=band_selection,overlap=overlap, eliminate_border_px=eliminate_border_px)    
 
         # If model is a torch.nn.Module, do 1-batch SR with patching on the fly
         if isinstance(model, LightningModule):
@@ -480,15 +480,18 @@ class windowed_SR_and_saving():
                 "batch_size": 24,
                 "prefetch_factor": 4,
                 "accelerator": "gpu",
-                "devices": -1,
+                "devices": 1,
                 "strategy": "ddp",
                 "custom_steps": custom_steps}
             predict_pl_workflow(input_file=self.folder_path,model=model,**args)
         elif isinstance(model, torch.nn.Module):
             print("Model is torch.NN.Module, performing 1-batched inference with patching on the fly. For faster inference, provide a PyTorch Lightning module.")
             self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
+        elif model==None: # test case
+            print("No model passed. Performing interpolation instead of SR for testing purposes.")
+            self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
         else:
-            raise NotImplementedError("Model type not recognized. Please provide a PyTorch Lightning module or a PyTorch module.")
+            raise NotImplementedError("Model type not recognized. Please provide a PyTorch Lightning model, PyTorch Model, or for testing purposes 'None'.")
        
         # if wanted, delete LR stack
         if not self.keep_lr_stack:
@@ -520,7 +523,7 @@ class windowed_SR_and_saving_dataset(Dataset):
         im = im.float()
         return(im)
 
-
+"""
 # logic to create PyTorch Dataset and DataLoader for this dataset object
 if __name__ == "__main__":
     folder_path = "/data2/simon/test_s2/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729T134559.SAFE/"
@@ -537,4 +540,4 @@ if __name__ == "__main__":
 
     #sr_obj.start_super_resolution(band_selection="20m")
     #sr_obj.start_super_resolution(band_selection="10m")
-
+"""

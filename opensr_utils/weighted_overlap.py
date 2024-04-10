@@ -189,5 +189,5 @@ def weighted_overlap(sr, placeholder,overlap=10,pixels_eliminate=0,hr_size=512):
     except:
         import warnings
         warnings.warn("Weighted overlap failed due to weight dimensions. Returning zero tensor.", UserWarning)
-        return(torch.zeros_like(sr))
+        return(torch.zeros_like(torch.Tensor(sr)))
     
