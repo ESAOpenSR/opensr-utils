@@ -5,7 +5,7 @@ from pytorch_lightning.callbacks import BasePredictionWriter
 from tqdm import tqdm
 
 def predict_pl_workflow(input_file,model,**kwargs):
-    band_selection = kwargs.get('band_selection', "20m")
+    band_selection = kwargs.get('band_selection', "10m")
     overlap = kwargs.get('overlap', 40)
     eliminate_border_px = kwargs.get('eliminate_border_px', 0)
     num_workers = kwargs.get('num_workers', 64)

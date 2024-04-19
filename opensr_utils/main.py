@@ -18,7 +18,7 @@ from opensr_utils.weighted_overlap import weighted_overlap
 
 class windowed_SR_and_saving():
     
-    def __init__(self, folder_path, window_size=(128, 128), factor=4, keep_lr_stack=True, mode="xAI"):
+    def __init__(self, folder_path, window_size=(128, 128), factor=4, keep_lr_stack=True, mode="SR"):
         """
         Class that performs windowed super-resolution on a Sentinel-2 image and saves the result. Steps:
         - Copies the 10m and 20m bands to new tiff files in the input directory.
@@ -569,12 +569,26 @@ class windowed_SR_and_saving_dataset(Dataset):
     the multi-threaded approach of Lightning and to 
     embedd it in the workflow with a PL SR model.
     """
-    def __init__(self, folder_path, band_selection="10m",
-                 overlap=20,eliminate_border_px=10,
-                 window_size=(128, 128), factor=4,keep_lr_stack=True):
+    def __init__(self, folder_path, **kwargs):
+        band_selection = kwargs.get('band_selection', "10m")
+        overlap = kwargs.get('overlap', 40)
+        eliminate_border_px = kwargs.get('eliminate_border_px', 0)
+        num_workers = kwargs.get('num_workers', 64)
+        batch_size = kwargs.get('batch_size', 24)
+        prefetch_factor = kwargs.get('prefetch_factor', 4)
+        accelerator = kwargs.get('accelerator', "gpu")
+        devices = kwargs.get('devices', -1)
+        strategy = kwargs.get('strategy', "ddp")
+        custom_steps = kwargs.get('custom_steps', 100)
+        mode =  kwargs.get('mode', "SR")
+        window_size = kwargs.get('window_size', (128,128))
+
+
+
         # create object
         self.sr_obj = windowed_SR_and_saving(folder_path, window_size=window_size,
-                                             factor=factor, keep_lr_stack=keep_lr_stack)
+                                             factor=4, keep_lr_stack=True,
+                                             mode=mode)
         # initialze information
         self.info_dict = self.sr_obj.initialize_info_dicts(band_selection=band_selection,
                                           overlap=overlap,
