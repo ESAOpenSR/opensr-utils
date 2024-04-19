@@ -18,7 +18,7 @@ from opensr_utils.weighted_overlap import weighted_overlap
 
 class windowed_SR_and_saving():
     
-    def __init__(self, folder_path, window_size=(128, 128), factor=4, keep_lr_stack=True):
+    def __init__(self, folder_path, window_size=(128, 128), factor=4, keep_lr_stack=True, mode="xAI"):
         """
         Class that performs windowed super-resolution on a Sentinel-2 image and saves the result. Steps:
         - Copies the 10m and 20m bands to new tiff files in the input directory.
@@ -57,9 +57,12 @@ class windowed_SR_and_saving():
         self.factor = factor # sr factor of the model
         self.hist_match = False # wether we want to perform hist matching here
         self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
+        self.mode = mode # select SR or uncertainty calculation
 
         # check that folder path exists, and that it's the correct type
         assert os.path.exists(self.folder_path), "Input folder/file path does not exist"
+        assert self.mode in ["SR","xAI"], "Mode not in ['SR','xAI']"
+        print("Working in ",self.mode,"mode!")
 
 
     def create_and_save_placeholder_SR_files(self,info_dict,out_name):
@@ -67,7 +70,13 @@ class windowed_SR_and_saving():
         Saves a georeferenced placeholder SR file in the input folder.
         """
         # create placeholder tensor in memory
-        sr_tensor_placeholder = np.zeros((len(info_dict["bands"]), 
+        # If we're in xAI, we only need and want 1 band of SR
+        if self.mode=="xAI":
+            no_bands = 1
+        if self.mode=="SR":
+            no_bands = len(info_dict["bands"])    
+        # create tensor
+        sr_tensor_placeholder = np.zeros((no_bands, 
                                                info_dict["img_width"]*self.factor,
                                                info_dict["img_height"]*self.factor),dtype=info_dict["dtype"])
         
@@ -88,7 +97,7 @@ class windowed_SR_and_saving():
         'nodata': None,  # Set to your no-data value, if applicable
         'width': info_dict["img_width"]*self.factor,
         'height': info_dict["img_height"]*self.factor,
-        'count': len(info_dict["bands"]),  # Number of bands; adjust if your array has multiple bands
+        'count': no_bands,  # Number of bands; adjust if your array has multiple bands
         'crs': info_dict["crs"],  # CRS (Coordinate Reference System); set as needed
         'transform': save_transform,  # Adjust as needed
                 }
@@ -219,6 +228,24 @@ class windowed_SR_and_saving():
         # delete LR stack
         os.remove(info_dict["lr_path"])
         print("Deleted stacked image at",info_dict["lr_path"])
+
+    def delete_lock_files(self):
+        # delete all lock files in the input directory to clean up
+        # Construct the pattern to match all .lock files
+        import glob
+        directory = self.folder_path
+        pattern = os.path.join(directory, '*.lock')
+        
+        # Find all files in the directory matching the pattern
+        lock_files = glob.glob(pattern)
+        
+        # Iterate over the list of file paths & remove each file
+        for file_path in lock_files:
+            try:
+                os.remove(file_path)
+                print(f"Deleted lock file: {file_path}")
+            except OSError as e:
+                print(f"Error deleting lock file: {file_path} : {e.strerror}")
         
     def fill_SR_overlap(self, sr, idx, info_dict):
         """
@@ -309,7 +336,7 @@ class windowed_SR_and_saving():
             
         # allow custom defined forward/SR call on model
         model_sr_call = getattr(model, forward_call,custom_steps)
-
+        
         # iterate over image batches
         for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc="Super-Resoluting"):
             # get image from S2 image
@@ -325,7 +352,11 @@ class windowed_SR_and_saving():
                 im = {"LR_image":im,"image":torch.rand(im.shape[0],im.shape[1],512,512)}
             
             # super-resolute image
-            sr = model_sr_call(im,custom_steps=custom_steps)
+            if self.mode=="SR":
+                sr = model_sr_call(im,custom_steps=custom_steps)
+                sr = sr.squeeze(0)
+            if self.mode=="xAI":
+                sr = self.calculate_uncertainty(im,model_sr_call,custom_steps=custom_steps)
 
             # try to move to CPU, might be already on CPU in some cases, therefore try catch block
             try:
@@ -334,10 +365,37 @@ class windowed_SR_and_saving():
                 pass
             
             # save SR into image
-            self.fill_SR_overlap(sr[0],idx,info_dict)
+            self.fill_SR_overlap(sr,idx,info_dict)
 
         # when done, save array into same directory
         print("Finished. SR image saved at",info_dict["sr_path"])
+
+    def calculate_uncertainty(self,im,model_sr_call,custom_steps=200):
+        
+        device = "cuda:0"
+        print("Device info:",device)
+        
+        if len(im.shape)==3:
+            im = im.unsqueeze(0)
+        im = im.float()
+        im = im.to(device)
+        
+        no_uncertainty = 20 # amount of images to SR
+        variations = []
+        for i in range(no_uncertainty):
+            sr = model_sr_call(im)
+            sr = sr.squeeze(0)
+            variations.append(sr.detach().cpu())
+        variations = torch.stack(variations)
+
+        # Get statistics for xAI
+        srs_mean = variations.mean(dim=0)
+        srs_stdev = variations.std(dim=0)
+        lower_bound = srs_mean-srs_stdev
+        upper_bound = srs_mean+srs_stdev
+        interval_size = srs_stdev*2
+        interval_size = interval_size.mean(dim=0).unsqueeze(0)
+        return interval_size
 
     
     def initialize_info_dicts(self,band_selection="10m",overlap=8, eliminate_border_px=0):
@@ -404,7 +462,7 @@ class windowed_SR_and_saving():
             
             # call local functions: get windxw coordinates and create placeholder SR file
             self.b10m_info["window_coordinates"] = self.create_window_coordinates_overlap(self.b10m_info)
-            out_name = str("SR"+"_10mbands.tif")
+            out_name = str(self.mode+"_10mbands.tif")
             self.b10m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b10m_info,out_name=out_name)
             info_dict = self.b10m_info
             return(info_dict)
@@ -457,7 +515,7 @@ class windowed_SR_and_saving():
 
             # call local functions: get windxw coordinates and create placeholder SR file
             self.b20m_info["window_coordinates"] = self.create_window_coordinates_overlap(self.b20m_info)
-            out_name = str("SR"+"_20mbands.tif")
+            out_name = str(self.mode+"_20mbands.tif")
             self.b20m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b20m_info,out_name=out_name)
             info_dict = self.b20m_info
             return(info_dict)
@@ -471,6 +529,7 @@ class windowed_SR_and_saving():
 
         # If model is a torch.nn.Module, do 1-batch SR with patching on the fly
         if isinstance(model, LightningModule):
+            print("Lightning Model detected, performing multi-batched inference with PyTorch Lightning.")
             from opensr_utils.pl_utils import predict_pl_workflow
             args = {
                 "band_selection": band_selection,
@@ -482,10 +541,13 @@ class windowed_SR_and_saving():
                 "accelerator": "gpu",
                 "devices": 1,
                 "strategy": "ddp",
-                "custom_steps": custom_steps}
+                "custom_steps": custom_steps,
+                "mode": self.mode,
+                "window_size": self.window_size}
             predict_pl_workflow(input_file=self.folder_path,model=model,**args)
         elif isinstance(model, torch.nn.Module):
-            print("Model is torch.NN.Module, performing 1-batched inference with patching on the fly. For faster inference, provide a PyTorch Lightning module.")
+            if self.mode!="xAI":
+                print("Model is torch.NN.Module, performing 1-batched inference with patching on the fly. For faster inference, provide a PyTorch Lightning module.")
             self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
         elif model==None: # test case
             print("No model passed. Performing interpolation instead of SR for testing purposes.")
@@ -493,6 +555,9 @@ class windowed_SR_and_saving():
         else:
             raise NotImplementedError("Model type not recognized. Please provide a PyTorch Lightning model, PyTorch Model, or for testing purposes 'None'.")
        
+        # CLEANUP
+        self.delete_lock_files() # delete lock files created for multiprocessing
+
         # if wanted, delete LR stack
         if not self.keep_lr_stack:
             self.delete_LR_stack(info_dict)

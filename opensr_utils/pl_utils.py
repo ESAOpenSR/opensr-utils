@@ -7,7 +7,7 @@ from tqdm import tqdm
 def predict_pl_workflow(input_file,model,**kwargs):
     band_selection = kwargs.get('band_selection', "20m")
     overlap = kwargs.get('overlap', 40)
-    eliminate_border_px = kwargs.get('eliminate_border_px', 20)
+    eliminate_border_px = kwargs.get('eliminate_border_px', 0)
     num_workers = kwargs.get('num_workers', 64)
     batch_size = kwargs.get('batch_size', 24)
     prefetch_factor = kwargs.get('prefetch_factor', 4)
@@ -15,6 +15,8 @@ def predict_pl_workflow(input_file,model,**kwargs):
     devices = kwargs.get('devices', -1)
     strategy = kwargs.get('strategy', "ddp")
     custom_steps = kwargs.get('custom_steps', 100)
+    mode =  kwargs.get('mode', "SR")
+    window_size = kwargs.get('window_size', (128,128))
     
     # -----------------------------------------------------------------------------
     # Create PyTorch Lighnting Workflow for Multi-GPU processing
@@ -27,7 +29,7 @@ def predict_pl_workflow(input_file,model,**kwargs):
     from torch.utils.data import Dataset, DataLoader
     ds = windowed_SR_and_saving_dataset(folder_path=input_file, band_selection=band_selection,
                                         overlap=overlap,eliminate_border_px=eliminate_border_px,
-                                        keep_lr_stack=False)
+                                        window_size=window_size,keep_lr_stack=False)
     dl = DataLoader(ds,num_workers=num_workers, batch_size=batch_size,prefetch_factor=prefetch_factor)
 
     # Create custom writer that writes pl_model outputs to placeholder
@@ -41,10 +43,11 @@ def predict_pl_workflow(input_file,model,**kwargs):
     # initialize models
     device = "cuda" if torch.cuda.is_available() else "cpu"
     pl_model = model
+    # set properties for model
+    model.mode = mode
 
     # run prediction
     trainer.predict(pl_model, dataloaders=dl,return_predictions=False)
-
 
 
 class CustomWriter(BasePredictionWriter):
