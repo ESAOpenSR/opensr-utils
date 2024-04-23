@@ -21,7 +21,7 @@ file_path = "/data1/simon/datasets/val_s2_tiles/S2B_MSIL2A_20230830T162839_N0509
 sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="xAI")
 sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",overlap=20, eliminate_border_px=0)
 
-alcnaLfobu
+
 """ 
 ----------------------------------------------------------------
 1. Run SR - 10 & 20m with opensr-utils - Examples

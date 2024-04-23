@@ -25,7 +25,24 @@ def extract_10mbands_from_S2_folder(data_folder):
     FileNotFoundError: If any of the expected band files (B02, B03, B04, B08) are not found within the data folder.
     """
     
-    
+    # read all files - can handle L1C and L2A
+    import os
+    data_folder = "/data1/simon/datasets/val_s2_tiles/S2A_MSIL1C_20240417T134711_N0510_R024_T21HUB_20240417T202841.SAFE/"
+    files_ls = []   
+    for root, dirs, files in os.walk(data_folder):
+        for file in files:
+            if file.endswith('.jp2'):
+                if any(band in file for band in ["B04","B03","B02","B08",]):
+                    full_path = os.path.join(root, file)
+                    if "IMG_DATA" in full_path:
+                        files_ls.append(full_path)
+    image_files = {"R":[file for file in files_ls if "B04" in file][0],
+                   "G":[file for file in files_ls if "B03" in file][0],
+                   "B":[file for file in files_ls if "B02" in file][0],
+                   "NIR":[file for file in files_ls if "B08" in file][0]}
+
+
+    """
     # get location of image data
     for dirpath, dirnames, _ in os.walk(data_folder):
         if "IMG_DATA" in dirnames:
@@ -36,6 +53,7 @@ def extract_10mbands_from_S2_folder(data_folder):
                    "G":os.path.join(folder_path,[file for file in file_paths if "B03" in file][0]),
                    "B":os.path.join(folder_path,[file for file in file_paths if "B02" in file][0]),
                    "NIR":os.path.join(folder_path,[file for file in file_paths if "B08" in file][0])}
+    """
     
     
     # READ FILES
