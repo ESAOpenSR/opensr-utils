@@ -26,8 +26,6 @@ def extract_10mbands_from_S2_folder(data_folder):
     """
     
     # read all files - can handle L1C and L2A
-    import os
-    data_folder = "/data1/simon/datasets/val_s2_tiles/S2A_MSIL1C_20240417T134711_N0510_R024_T21HUB_20240417T202841.SAFE/"
     files_ls = []   
     for root, dirs, files in os.walk(data_folder):
         for file in files:
