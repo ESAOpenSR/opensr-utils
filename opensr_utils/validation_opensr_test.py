@@ -12,6 +12,8 @@ def compute_metrics(lr,sr):
         pass
 
     print("LR SHAPE:",lr.shape)
+    print("SR SHAPE:",sr.shape)
+
     if len(sr.shape)>3:
         sr = sr.squeeze(0)
     if len(lr.shape)>3:
@@ -21,6 +23,10 @@ def compute_metrics(lr,sr):
         sr = sr.permute(1,2,0)
     if lr.shape[-1]<lr.shape[0]:
         lr = lr.permute(1,2,0)
+
+    print("LR SHAPE:",lr.shape)
+    print("SR SHAPE:",sr.shape)
+    
 
     metrics = opensr_test.Metrics()
     m = metrics.compute(lr=lr, sr=sr, hr=sr)
