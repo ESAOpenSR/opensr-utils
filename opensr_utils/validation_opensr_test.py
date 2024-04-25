@@ -2,6 +2,16 @@ import torch
 import opensr_test
 
 def compute_metrics(lr,sr):
+    try:
+        lr = lr.detach()
+    except:
+        pass
+    try:
+        sr = sr.detach()
+    except:
+        pass
+
+    
     metrics = opensr_test.Metrics()
     m = metrics.compute(lr=lr, sr=sr, hr=sr)
     return(m)

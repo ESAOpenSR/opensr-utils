@@ -28,19 +28,7 @@ class SRModelPL(pl.LightningModule): # placeholder interpolation model for testi
         return self.forward(x)
 none_model = SRModelPL()
 
-def save_metrics_as_json(metrics_dict, file_path):
-    import json
-    with open(file_path, 'w') as json_file:
-        json.dump(metrics_dict, json_file)
 
-
-from opensr_utils import windowed_SR_and_saving
-file_path = "/data1/simon/datasets/val_s2_tiles/S2B_MSIL2A_20230830T162839_N0509_R083_T16SEH_20230830T204046.SAFE/"
-sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="Metrics")
-#sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",overlap=20, eliminate_border_px=0)
-sr_obj.start_super_resolution(band_selection="10m",model=none_model,forward_call="forward")
-save_metrics_as_json(sr_obj.metrics, "metrics_1.json")
-# save dict as json
 
 
 
