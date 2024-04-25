@@ -587,7 +587,7 @@ class windowed_SR_and_saving():
                 if idx>=amount:
                     break
                 # random number int to get random window
-                idx = np.random.randint(0,len(info_dict["window_coordinates"]))
+                #idx = np.random.randint(0,len(info_dict["window_coordinates"]))
                 # get image from S2 image
                 im = self.get_window(idx,info_dict)
                 # batch image
