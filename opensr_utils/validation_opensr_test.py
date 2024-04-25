@@ -11,26 +11,27 @@ def compute_metrics(lr,sr):
     except:
         pass
 
-    print("LR SHAPE:",lr.shape)
-    print("SR SHAPE:",sr.shape)
-
+    # squeeze batch dim if needed
     if len(sr.shape)>3:
         sr = sr.squeeze(0)
     if len(lr.shape)>3:
         lr = lr.squeeze(0)
 
+    # permute to (C,H,W) if needed
     if sr.shape[-1]<sr.shape[0]:
         sr = sr.permute(1,2,0)
     if lr.shape[-1]<lr.shape[0]:
         lr = lr.permute(1,2,0)
 
-    print("LR SHAPE:",lr.shape)
-    print("SR SHAPE:",sr.shape)
-    
+    # opensr_test cant take 32x32 patches, interpoalte if needed
+    if lr.shape[0]<64:
+        lr = torch.nn.functional.interpolate(lr.unsqueeze(0), scale_factor=2, mode='nearest', align_corners=False).squeeze(0)
+        sr = torch.nn.functional.interpolate(sr.unsqueeze(0), scale_factor=2, mode='nearest', align_corners=False).squeeze(0)
 
     metrics = opensr_test.Metrics()
     m = metrics.compute(lr=lr, sr=sr, hr=sr)
     return(m)
+
 
 def append_dicts(original_dict, new_dict):
     """
