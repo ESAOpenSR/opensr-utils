@@ -11,7 +11,11 @@ def compute_metrics(lr,sr):
     except:
         pass
 
-    
+    if len(sr.shape)>3:
+        sr = sr.squeeze(0)
+    if len(im.shape)>3:
+        im = im.squeeze(0)
+
     metrics = opensr_test.Metrics()
     m = metrics.compute(lr=lr, sr=sr, hr=sr)
     return(m)

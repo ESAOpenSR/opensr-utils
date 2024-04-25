@@ -599,8 +599,6 @@ class windowed_SR_and_saving():
                 # super-resolute image
                 sr = model_sr_call(im)
                 # send to calculation
-                sr = sr.squeeze(0)
-                im = im.squeeze(0)
                 m = compute_metrics(im,sr)
                 #m["window"] = info_dict["window_coordinates"][idx]
                 metrics_dict = append_dicts(metrics_dict,m)
