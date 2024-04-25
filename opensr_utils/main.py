@@ -61,7 +61,7 @@ class windowed_SR_and_saving():
 
         # check that folder path exists, and that it's the correct type
         assert os.path.exists(self.folder_path), "Input folder/file path does not exist"
-        assert self.mode in ["SR","xAI"], "Mode not in ['SR','xAI']"
+        assert self.mode in ["SR","xAI","Metrics"], "Mode not in ['SR','xAI','Metrics']"
         print("Working in ",self.mode,"mode!")
 
 
@@ -412,9 +412,7 @@ class windowed_SR_and_saving():
             from opensr_utils.utils import can_read_directly_with_rasterio
             assert can_read_directly_with_rasterio(self.folder_path) == True
 
-
         if band_selection=="10m":
-
             # If Safe format, perform band extraction ect
             if safe_format:
                 # work with file lock in order to not do this multiple times during Multi-GPU inference
@@ -444,10 +442,7 @@ class windowed_SR_and_saving():
             if safe_format==False:
                 self.b10m_file_path = os.path.join(self.folder_path)
 
-
-
             # Get File information - 10m bands
-            
             self.b10m_info = {}
             self.b10m_info["lr_path"] = self.b10m_file_path
             self.b10m_info["bands"] = [0,1,2,3]
@@ -463,7 +458,8 @@ class windowed_SR_and_saving():
             # call local functions: get windxw coordinates and create placeholder SR file
             self.b10m_info["window_coordinates"] = self.create_window_coordinates_overlap(self.b10m_info)
             out_name = str(self.mode+"_10mbands.tif")
-            self.b10m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b10m_info,out_name=out_name)
+            if self.mode!="Metrics":
+                self.b10m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b10m_info,out_name=out_name)
             info_dict = self.b10m_info
             return(info_dict)
         
@@ -497,8 +493,6 @@ class windowed_SR_and_saving():
             if safe_format==False:
                 self.b20m_file_path = os.path.join(self.folder_path)
 
-
-
             # Get File information - 20m bands 
             self.b20m_file_path = os.path.join(self.folder_path,"stacked_20m.tif")
             self.b20m_info = {}
@@ -516,16 +510,26 @@ class windowed_SR_and_saving():
             # call local functions: get windxw coordinates and create placeholder SR file
             self.b20m_info["window_coordinates"] = self.create_window_coordinates_overlap(self.b20m_info)
             out_name = str(self.mode+"_20mbands.tif")
-            self.b20m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b20m_info,out_name=out_name)
+            if self.mode!="Metrics":
+                self.b20m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b20m_info,out_name=out_name)
             info_dict = self.b20m_info
             return(info_dict)
 
     
     def start_super_resolution(self,band_selection="10m",model=None, forward_call="forward", custom_steps=100, overlap=8, eliminate_border_px=0):
+        print("Reminder: working in ",self.mode,"mode!")
         # TODO: then, profit from these settings from the PL dataset class
         # assert band selection in available implemented methods
         assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"    
-        info_dict = self.initialize_info_dicts(band_selection=band_selection,overlap=overlap, eliminate_border_px=eliminate_border_px)    
+        info_dict = self.initialize_info_dicts(band_selection=band_selection,overlap=overlap, eliminate_border_px=eliminate_border_px)  
+
+        
+        # if we're in metrics mode, go straight to metrics calculation
+        if self.mode=="Metrics":
+            metrics = self.start_metric_calculation(band_selection=band_selection,model=model, forward_call=forward_call, custom_steps=custom_steps)
+            self.metrics = metrics
+            print("Metrics calculated. Saved in self.metrics.")
+            return(None)
 
         # If model is a torch.nn.Module, do 1-batch SR with patching on the fly
         if isinstance(model, LightningModule):
@@ -561,6 +565,53 @@ class windowed_SR_and_saving():
         # if wanted, delete LR stack
         if not self.keep_lr_stack:
             self.delete_LR_stack(info_dict)
+
+
+
+    def start_metric_calculation(self,band_selection="10m",model=None, forward_call="forward", custom_steps=200):
+        from opensr_utils.validation_opensr_test import append_dicts
+        from opensr_utils.validation_opensr_test import compute_metrics
+        # TODO: then, profit from these settings from the PL dataset class
+        # assert band selection in available implemented methods
+        assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"    
+        info_dict = self.initialize_info_dicts(band_selection=band_selection,overlap=2, eliminate_border_px=0)    
+        model_sr_call = getattr(model, forward_call,custom_steps)
+
+        # If model is a torch.nn.Module, do 1-batch SR with patching on the fly
+        if isinstance(model, LightningModule):
+            # iterate over image batches
+            metrics_dict = {} # save metric dictionary
+            amount = 500
+            for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc="Calculating Metrics",total=amount):
+                # only do x amount
+                if idx>=amount:
+                    break
+                # random number int to get random window
+                idx = np.random.randint(0,len(info_dict["window_coordinates"]))
+                # get image from S2 image
+                im = self.get_window(idx,info_dict)
+                # batch image
+                im = im.unsqueeze(0)
+                # turn into wanted dtype (double)
+                im = im.float()
+                # send to device
+                im = im.cuda()
+                # super-resolute image
+                sr = model_sr_call(im)
+                # send to calculation
+                sr = sr.squeeze(0)
+                im = im.squeeze(0)
+                m = compute_metrics(im,sr)
+                #m["window"] = info_dict["window_coordinates"][idx]
+                metrics_dict = append_dicts(metrics_dict,m)
+            return(metrics_dict)
+
+        else:
+            print("Model is torch.NN.Module. Metrics calculation currently only supported for PyTorch Lightning models.")
+            return(None)
+        
+        
+       
 
 from torch.utils.data import Dataset, DataLoader
 class windowed_SR_and_saving_dataset(Dataset):

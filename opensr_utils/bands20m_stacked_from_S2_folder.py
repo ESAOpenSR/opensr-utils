@@ -25,7 +25,26 @@ def extract_20mbands_from_S2_folder(data_folder):
     Raises:
     FileNotFoundError: If any of the expected band files (B05, B06, B07, B8A, B11, B12) are not found within the data folder.
     """
-    
+
+    # read all files - can handle L1C and L2A
+    files_ls = []   
+    for root, dirs, files in os.walk(data_folder):
+        for file in files:
+            if file.endswith('.jp2'):
+                if any(band in file for band in ["B05","B06","B07","B8A","B11","B12"]):
+                    full_path = os.path.join(root, file)
+                    if "IMG_DATA" in full_path:
+                        files_ls.append(full_path)
+    image_files = {"RE1":[file for file in files_ls if "B05" in file][0],
+                   "RE2":[file for file in files_ls if "B06" in file][0],
+                   "RE3":[file for file in files_ls if "B07" in file][0],
+                   "NIR2":[file for file in files_ls if "B8A" in file][0],
+                   "SWIR1":[file for file in files_ls if "B11" in file][0],
+                   "SWIR2":[file for file in files_ls if "B12" in file][0],
+                   }
+
+
+    """
     # get location of image data
     for dirpath, dirnames, _ in os.walk(data_folder):
         if "IMG_DATA" in dirnames:
@@ -40,6 +59,7 @@ def extract_20mbands_from_S2_folder(data_folder):
                    "SWIR1":os.path.join(folder_path,[file for file in file_paths if "B11" in file][0]),
                    "SWIR2":os.path.join(folder_path,[file for file in file_paths if "B12" in file][0])
                    }
+    """
     
     
     # READ FILES

@@ -16,10 +16,32 @@ model_10m.load_pretrained("opensr_10m_v4_v3.ckpt")
 #model_20m.load_pretrained("opensr_20m_v4_v3.ckpt")
 
 
+import torch
+import pytorch_lightning as pl
+class SRModelPL(pl.LightningModule): # placeholder interpolation model for testing
+    def __init__(self):
+        super(SRModelPL, self).__init__()
+    def forward(self, x, custom_steps=100):
+        sr = torch.nn.functional.interpolate(x, size=(512, 512), mode='nearest')
+        return sr
+    def predict(self,x,custom_steps=100):
+        return self.forward(x)
+none_model = SRModelPL()
+
+def save_metrics_as_json(metrics_dict, file_path):
+    import json
+    with open(file_path, 'w') as json_file:
+        json.dump(metrics_dict, json_file)
+
+
 from opensr_utils import windowed_SR_and_saving
 file_path = "/data1/simon/datasets/val_s2_tiles/S2B_MSIL2A_20230830T162839_N0509_R083_T16SEH_20230830T204046.SAFE/"
-sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="xAI")
-sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",overlap=20, eliminate_border_px=0)
+sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="Metrics")
+#sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",overlap=20, eliminate_border_px=0)
+sr_obj.start_super_resolution(band_selection="10m",model=none_model,forward_call="forward")
+save_metrics_as_json(sr_obj.metrics, "metrics_1.json")
+# save dict as json
+
 
 
 """ 
