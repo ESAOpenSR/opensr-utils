@@ -25,8 +25,8 @@ def compute_metrics(lr,sr):
 
     # opensr_test cant take 32x32 patches, interpoalte if needed
     if lr.shape[0]<64:
-        lr = torch.nn.functional.interpolate(lr.unsqueeze(0), scale_factor=2, mode='nearest', align_corners=False).squeeze(0)
-        sr = torch.nn.functional.interpolate(sr.unsqueeze(0), scale_factor=2, mode='nearest', align_corners=False).squeeze(0)
+        lr = torch.nn.functional.interpolate(lr.unsqueeze(0), scale_factor=2, mode='linear', align_corners=False).squeeze(0)
+        sr = torch.nn.functional.interpolate(sr.unsqueeze(0), scale_factor=2, mode='linear', align_corners=False).squeeze(0)
 
     metrics = opensr_test.Metrics()
     m = metrics.compute(lr=lr, sr=sr, hr=sr)
