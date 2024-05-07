@@ -7,6 +7,15 @@
 *.pt
 *.ckpt
 *.safetensors
+*.png
+*.json
+images/
+images/*
+*.pth
+other.py
+validation_calc_opensr.py
+ablation_copy.py
+
 
 # other
 __pycache__/*

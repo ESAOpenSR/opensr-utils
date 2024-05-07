@@ -26,7 +26,7 @@ file_path = "/data1/simon/datasets/val_s2_tiles/S2B_MSIL2A_20230830T162839_N0509
 try:
     sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="Metrics")
     sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",custom_steps=200)
-    save_metrics_as_json(sr_obj.metrics, file_path+"metrics.json")
+    save_metrics_as_json(sr_obj.metrics, file_path+"metrics_dif.json")
 except:
     print("Error in",file_path)
 
@@ -35,7 +35,7 @@ file_path = "/data1/simon/datasets/val_s2_tiles/S2A_MSIL2A_20230811T134711_N0509
 try:
     sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="Metrics")
     sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",custom_steps=200)
-    save_metrics_as_json(sr_obj.metrics, file_path+"metrics.json")
+    save_metrics_as_json(sr_obj.metrics, file_path+"metrics_dif.json")
 except:
     print("Error in",file_path)
 
@@ -44,7 +44,7 @@ file_path = "/data1/simon/datasets/val_s2_tiles/S2A_MSIL2A_20230909T103631_N0509
 try:
     sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="Metrics")
     sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",custom_steps=200)
-    save_metrics_as_json(sr_obj.metrics, file_path+"metrics.json")
+    save_metrics_as_json(sr_obj.metrics, file_path+"metrics_dif.json")
 except:
     print("Error in",file_path)
 
@@ -53,7 +53,7 @@ file_path = "/data1/simon/datasets/val_s2_tiles/S2A_MSIL2A_20230916T084611_N0509
 try:
     sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="Metrics")
     sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",custom_steps=200)
-    save_metrics_as_json(sr_obj.metrics, file_path+"metrics.json")
+    save_metrics_as_json(sr_obj.metrics, file_path+"metrics_dif.json")
 except:
     print("Error in",file_path)
 
@@ -62,7 +62,7 @@ file_path = "/data1/simon/datasets/val_s2_tiles/S2B_MSIL1C_20230820T094549_N0509
 try:
     sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="Metrics")
     sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",custom_steps=200)
-    save_metrics_as_json(sr_obj.metrics, file_path+"metrics.json")
+    save_metrics_as_json(sr_obj.metrics, file_path+"metrics_dif.json")
 except:
     print("Error in",file_path)
 
@@ -72,7 +72,7 @@ file_path = "/data1/simon/datasets/val_s2_tiles/S2B_MSIL2A_20230916T000229_N0509
 try:
     sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="Metrics")
     sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",custom_steps=200)
-    save_metrics_as_json(sr_obj.metrics, file_path+"metrics_6.json")
+    save_metrics_as_json(sr_obj.metrics, file_path+"metrics_dif.json")
 except:
     print("Error in",file_path)
 

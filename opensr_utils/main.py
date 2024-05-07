@@ -6,6 +6,7 @@ import torch
 from tqdm import tqdm
 import os
 from pytorch_lightning import LightningModule
+import random
 
 
 # local imports
@@ -582,6 +583,7 @@ class windowed_SR_and_saving():
             # iterate over image batches
             metrics_dict = {} # save metric dictionary
             amount = 500
+            random.shuffle(info_dict["window_coordinates"]) # randomls shuffle to get 500 random patches
             for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc="Calculating Metrics",total=amount):
                 # only do x amount
                 if idx>=amount:
