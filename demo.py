@@ -16,20 +16,6 @@ model_10m.load_pretrained("opensr_10m_v4_v3.ckpt")
 #model_20m.load_pretrained("opensr_20m_v4_v3.ckpt")
 
 
-import torch
-import pytorch_lightning as pl
-class SRModelPL(pl.LightningModule): # placeholder interpolation model for testing
-    def __init__(self):
-        super(SRModelPL, self).__init__()
-    def forward(self, x, custom_steps=100):
-        sr = torch.nn.functional.interpolate(x, size=(512, 512), mode='nearest')
-        return sr
-    def predict(self,x,custom_steps=100):
-        return self.forward(x)
-none_model = SRModelPL()
-
-
-
 
 
 """ 

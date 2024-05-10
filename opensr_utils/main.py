@@ -6,6 +6,7 @@ import torch
 from tqdm import tqdm
 import os
 from pytorch_lightning import LightningModule
+import pytorch_lightning
 import random
 
 
@@ -339,7 +340,10 @@ class windowed_SR_and_saving():
         model_sr_call = getattr(model, forward_call,custom_steps)
         
         # iterate over image batches
-        for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc="Super-Resoluting"):
+        desc_str = "Super-Resoluting"
+        if self.mode=="xAI":
+            desc_str = "Calculating Uncertainty, 15x more tiem required"
+        for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc=desc_str):
             # get image from S2 image
             im = self.get_window(idx,info_dict)
             # batch image
@@ -371,7 +375,7 @@ class windowed_SR_and_saving():
         # when done, save array into same directory
         print("Finished. SR image saved at",info_dict["sr_path"])
 
-    def calculate_uncertainty(self,im,model_sr_call,custom_steps=200):
+    def calculate_uncertainty(self,im,model_sr_call,custom_steps=100):
         
         device = "cuda:0"
         print("Device info:",device)
@@ -381,9 +385,12 @@ class windowed_SR_and_saving():
         im = im.float()
         im = im.to(device)
         
-        no_uncertainty = 20 # amount of images to SR
+        no_uncertainty = 15 # amount of images to SR
+        seed_list = np.random.randint(0, 1000000, size=no_uncertainty)
         variations = []
         for i in range(no_uncertainty):
+            torch.manual_seed(seed_list[i])
+            pytorch_lightning.seed_everything(seed_list[i])
             sr = model_sr_call(im)
             sr = sr.squeeze(0)
             variations.append(sr.detach().cpu())
@@ -549,7 +556,11 @@ class windowed_SR_and_saving():
                 "custom_steps": custom_steps,
                 "mode": self.mode,
                 "window_size": self.window_size}
-            predict_pl_workflow(input_file=self.folder_path,model=model,**args)
+            if self.mode=="SR":
+                predict_pl_workflow(input_file=self.folder_path,model=model,**args)
+            elif self.mode=="xAI":
+                pass
+                #predict_pl_workflow(input_file=self.folder_path,model=model,**args)
         elif isinstance(model, torch.nn.Module):
             if self.mode!="xAI":
                 print("Model is torch.NN.Module, performing 1-batched inference with patching on the fly. For faster inference, provide a PyTorch Lightning module.")
