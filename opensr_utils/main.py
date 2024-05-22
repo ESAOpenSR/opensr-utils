@@ -1,3 +1,4 @@
+# general imports
 import rasterio
 from einops import rearrange
 from rasterio.transform import Affine
@@ -9,13 +10,13 @@ from pytorch_lightning import LightningModule
 import pytorch_lightning
 import random
 
-
 # local imports
 from opensr_utils.denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
 from opensr_utils.stretching import hq_histogram_matching
 from opensr_utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
 from opensr_utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S2_folder
 from opensr_utils.weighted_overlap import weighted_overlap
+from opensr_utils.utils import SuppressPrint
 
 
 class windowed_SR_and_saving():
@@ -65,6 +66,10 @@ class windowed_SR_and_saving():
         assert os.path.exists(self.folder_path), "Input folder/file path does not exist"
         assert self.mode in ["SR","xAI","Metrics"], "Mode not in ['SR','xAI','Metrics']"
         print("Working in ",self.mode,"mode!")
+
+        from opensr_utils.utils import can_read_directly_with_rasterio
+        if can_read_directly_with_rasterio(self.folder_path) == True:
+            self.input_file_path = self.folder_path
 
 
     def create_and_save_placeholder_SR_files(self,info_dict,out_name):
@@ -116,8 +121,9 @@ class windowed_SR_and_saving():
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 # This block now runs only in the process that acquired the lock
                 if os.path.exists(output_file_path): # remove file if it exists
-                    os.remove(output_file_path)
-                    print("Overwriting existing placeholder file...")
+                    print("Placeholder file found, skipping creation...")
+                    #os.remove(output_file_path)
+                    #print("Overwriting existing placeholder file...")
                 if not os.path.exists(output_file_path): # create file
                     # FILE CREATION LOGIC -----------------------------------------------------------------------
                     # Create and write SR placeholder to the raster file
@@ -342,7 +348,8 @@ class windowed_SR_and_saving():
         # iterate over image batches
         desc_str = "Super-Resoluting"
         if self.mode=="xAI":
-            desc_str = "Calculating Uncertainty, 15x more tiem required"
+            desc_str = "Calculating Uncertainty, 15x more time required"
+
         for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc=desc_str):
             # get image from S2 image
             im = self.get_window(idx,info_dict)
@@ -376,7 +383,6 @@ class windowed_SR_and_saving():
         print("Finished. SR image saved at",info_dict["sr_path"])
 
     def calculate_uncertainty(self,im,model_sr_call,custom_steps=100):
-        
         device = "cuda:0"
         print("Device info:",device)
         
@@ -389,8 +395,10 @@ class windowed_SR_and_saving():
         seed_list = np.random.randint(0, 1000000, size=no_uncertainty)
         variations = []
         for i in range(no_uncertainty):
-            torch.manual_seed(seed_list[i])
-            pytorch_lightning.seed_everything(seed_list[i])
+            with SuppressPrint():
+                print("Rand Seed",seed_list[i])
+                torch.manual_seed(seed_list[i])
+                pytorch_lightning.seed_everything(seed_list[i])
             sr = model_sr_call(im)
             sr = sr.squeeze(0)
             variations.append(sr.detach().cpu())
@@ -407,6 +415,8 @@ class windowed_SR_and_saving():
 
     
     def initialize_info_dicts(self,band_selection="10m",overlap=8, eliminate_border_px=0):
+        import os
+        from opensr_utils.utils import can_read_directly_with_rasterio
         # select info dictionary:
         # 1 .Get file info from Rasterio
         # 2. Create window coordinates for selected bands
@@ -415,10 +425,24 @@ class windowed_SR_and_saving():
         # check wether input is in .SAFE format or is traight to file
         if self.folder_path.replace("/","")[-5:] == ".SAFE":
             safe_format = True
-        else:
+            stack_output_path = os.path.join(self.folder_path,"stacked_10m.tif") # if safe format, append file name to folder 
+        elif can_read_directly_with_rasterio(self.folder_path) == True:
+            print("elif:",self.folder_path)
             safe_format = False
-            from opensr_utils.utils import can_read_directly_with_rasterio
-            assert can_read_directly_with_rasterio(self.folder_path) == True
+            folder_path_tmp = os.path.dirname(self.folder_path)
+            file_name_tmp = os.path.basename(self.folder_path)
+            self.folder_path = folder_path_tmp
+            stack_output_path = os.path.join(self.folder_path,file_name_tmp)
+        else:
+            print("else:",self.folder_path)
+            safe_format = False
+            # extract folder path from file path
+            folder_path_tmp = os.path.dirname(self.folder_path)
+            file_name_tmp = os.path.basename(self.folder_path)
+            self.folder_path = folder_path_tmp
+            stack_output_path = os.path.join(self.folder_path,file_name_tmp) # if input is file, keep file name as stacked
+            # make sure the file that has been inputted is valid
+            assert can_read_directly_with_rasterio(stack_output_path) == True, "Input is a file. File type can not be opened by 'rasterio'"
 
         if band_selection=="10m":
             # If Safe format, perform band extraction ect
@@ -427,7 +451,6 @@ class windowed_SR_and_saving():
                 # Attempt to acquire an exclusive lock on a temporary lock file
                 import os
                 import fcntl
-                stack_output_path = os.path.join(self.folder_path,"stacked_10m.tif")
                 lock_file_path = stack_output_path + ".lock"
                 with open(lock_file_path, 'w') as lock_file:
                     try:
@@ -448,7 +471,8 @@ class windowed_SR_and_saving():
                         pass
                 self.b10m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
             if safe_format==False:
-                self.b10m_file_path = os.path.join(self.folder_path)
+                print(stack_output_path)
+                self.b10m_file_path = stack_output_path
 
             # Get File information - 10m bands
             self.b10m_info = {}
@@ -529,7 +553,13 @@ class windowed_SR_and_saving():
         # TODO: then, profit from these settings from the PL dataset class
         # assert band selection in available implemented methods
         assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"    
-        info_dict = self.initialize_info_dicts(band_selection=band_selection,overlap=overlap, eliminate_border_px=eliminate_border_px)  
+
+        # if self.info_dict doesnt exist
+        if hasattr(self, 'info_dict'):
+            pass
+        else:
+            info_dict = self.initialize_info_dicts(band_selection=band_selection,overlap=overlap, eliminate_border_px=eliminate_border_px)  
+            self.info_dict = info_dict
 
         
         # if we're in metrics mode, go straight to metrics calculation
@@ -539,8 +569,8 @@ class windowed_SR_and_saving():
             print("Metrics calculated. Saved in self.metrics.")
             return(None)
 
-        # If model is a torch.nn.Module, do 1-batch SR with patching on the fly
-        if isinstance(model, LightningModule):
+        # If model is a torch.nn.Module and SR wanted, do 1-batch SR with patching on the fly
+        if isinstance(model, LightningModule) and self.mode!="xAI":
             print("Lightning Model detected, performing multi-batched inference with PyTorch Lightning.")
             from opensr_utils.pl_utils import predict_pl_workflow
             args = {
@@ -556,15 +586,20 @@ class windowed_SR_and_saving():
                 "custom_steps": custom_steps,
                 "mode": self.mode,
                 "window_size": self.window_size}
-            if self.mode=="SR":
-                predict_pl_workflow(input_file=self.folder_path,model=model,**args)
-            elif self.mode=="xAI":
-                pass
-                #predict_pl_workflow(input_file=self.folder_path,model=model,**args)
-        elif isinstance(model, torch.nn.Module):
-            if self.mode!="xAI":
-                print("Model is torch.NN.Module, performing 1-batched inference with patching on the fly. For faster inference, provide a PyTorch Lightning module.")
+            predict_pl_workflow(input_file=self.folder_path,model=model,**args)
+
+        # if is torch model, perform standard slower SR and warn user
+        elif isinstance(model, torch.nn.Module) and self.mode=="SR":
+            print("Model is torch.NN.Module, performing 1-batched inference with patching on the fly. For faster inference, provide a PyTorch Lightning module.")
             self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
+        
+        # if model is lightning and we want to perform xAI, extract torch model and perform xAI
+        elif isinstance(model, LightningModule) and self.mode=="xAI":
+            model = model.model
+            assert isinstance(model, torch.nn.Module), "torch model extraction form PyTorch Lighnting failed"
+            print("Extracted torch.model from PyTorch Lightning, performing 1 GPU xAI...")
+            self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
+
         elif model==None: # test case
             print("No model passed. Performing interpolation instead of SR for testing purposes.")
             self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
@@ -581,6 +616,8 @@ class windowed_SR_and_saving():
 
 
     def start_metric_calculation(self,band_selection="10m",model=None, forward_call="forward", custom_steps=200):
+        raise NotImplementedError("Metrics calculation currently unavailable.")
+    
         from opensr_utils.validation_opensr_test import append_dicts
         from opensr_utils.validation_opensr_test import compute_metrics
         # TODO: then, profit from these settings from the PL dataset class
@@ -645,16 +682,12 @@ class windowed_SR_and_saving_dataset(Dataset):
         mode =  kwargs.get('mode', "SR")
         window_size = kwargs.get('window_size', (128,128))
 
-
-
         # create object
         self.sr_obj = windowed_SR_and_saving(folder_path, window_size=window_size,
                                              factor=4, keep_lr_stack=True,
                                              mode=mode)
         # initialze information
-        self.info_dict = self.sr_obj.initialize_info_dicts(band_selection=band_selection,
-                                          overlap=overlap,
-                                          eliminate_border_px=eliminate_border_px) 
+        self.info_dict = self.sr_obj.initialize_info_dicts(band_selection=band_selection,overlap=overlap,eliminate_border_px=eliminate_border_px) 
 
     def __len__(self):
         return(len(self.info_dict["window_coordinates"]))
@@ -663,22 +696,3 @@ class windowed_SR_and_saving_dataset(Dataset):
         im = self.sr_obj.get_window(idx,self.info_dict)
         im = im.float()
         return(im)
-
-"""
-# logic to create PyTorch Dataset and DataLoader for this dataset object
-if __name__ == "__main__":
-    folder_path = "/data2/simon/test_s2/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729T134559.SAFE/"
-    ds = windowed_SR_and_saving_dataset(folder_path=folder_path, band_selection="20m",
-                    overlap=20,eliminate_border_px=10,
-                    window_size=(128, 128), factor=4,keep_lr_stack=False)
-    dl = DataLoader(ds,batch_size=10,shuffle=False)
-
-if __name__ == "__main__":
-            
-    folder_path = "/data2/simon/test_s2/S2A_MSIL2A_20230729T100031_N0509_R122_T33TUG_20230729T134559.SAFE/"
-
-    sr_obj = windowed_SR_and_saving(folder_path,keep_lr_stack=True,mode="xAI")
-
-    #sr_obj.start_super_resolution(band_selection="20m")
-    #sr_obj.start_super_resolution(band_selection="10m")
-"""
