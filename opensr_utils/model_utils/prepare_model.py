@@ -13,7 +13,7 @@ class SRModelPL(LightningModule):
     def __init__(self):
         super(SRModelPL, self).__init__()
     def forward(self, x):
-        sr = torch.nn.functional.interpolate(x, size=(512, 512), mode='nearest')
+        sr = torch.nn.functional.interpolate(x, size=(512, 512), mode="bilinear")
         return sr
     def predict(self,x):
         return self.forward(x)

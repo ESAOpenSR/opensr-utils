@@ -28,7 +28,7 @@ def write_to_placeholder(self, sr, idx, image_meta, factor=4, overlap=8, elimina
     C, H, W = sr.shape
 
     # scale + dtype cast to match placeholder (keep if you store L2A-scaled)
-    sr = (sr * 10000.0).astype(image_meta["dtype"], copy=False)
+    sr = sr.astype(image_meta["dtype"], copy=False)
 
     # compute HR window from LR window
     lr_win = image_meta["window_coordinates"][idx]
