@@ -1,3 +1,6 @@
+*.pth
+*.ckpt
+
 
 # images
 *.tif

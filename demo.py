@@ -3,9 +3,13 @@
 1. Instanciate Models - 10 & 20m with opensr-model
 ----------------------------------------------------------------
 """
+
+
 import os
-#from pytorch_lightning import LightningModule
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+
+import time
+
 
 
 import opensr_model
@@ -15,8 +19,7 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # 10m Model
 model_10m = opensr_model.SRLatentDiffusionLightning(bands="10m",device=device) 
-ab_path = "/data1/simon/GitHub/latent-diffusion/logs/SR_pretrained_AE_S2NAIP_v4/2024-05-10_16-25-20/last.ckpt"
-model_10m.load_pretrained(ab_path)
+model_10m.load_pretrained("opensr_10m_v4_v6.ckpt")
 
 # 20m Model
 #model_20m = opensr_model.SRLatentDiffusionLightning(bands="20m",device=device)
@@ -27,15 +30,25 @@ model_10m.load_pretrained(ab_path)
 2. Run xAI - 10m Uncertainty Estimation - Example
 ----------------------------------------------------------------
 """
+from opensr_utils import windowed_SR_and_saving
+file_path = "/data1/simon/datasets/inf_data/S2B_MSIL2A_20241031T105109_N0511_R051_T30SYJ_20241031T133016.SAFE/"
+sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="SR")
+sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",overlap=20, eliminate_border_px=0)
+
+from opensr_utils import windowed_SR_and_saving
+file_path = "/data1/simon/datasets/inf_data/S2A_MSIL2A_20241026T105131_N0511_R051_T30SYJ_20241026T150453.SAFE/"
+sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="SR")
+sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",overlap=20, eliminate_border_px=0)
+exit()
 
 
 from opensr_utils import windowed_SR_and_saving
-file_path = "/data1/simon/datasets/val_s2_tiles/xai_testing/stacked_10m.tif"
-sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="xAI")
+file_path = "/data1/simon/datasets/inf_data/S2A_MSIL2A_20241026T105131_N0511_R051_T30SYJ_20241026T150453.SAFE"
+sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="SR")
 sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",overlap=20, eliminate_border_px=0)
 
-# stop python script here
-exit()
+
+
 
 """ 
 ----------------------------------------------------------------
@@ -43,6 +56,14 @@ exit()
 ----------------------------------------------------------------
 """
 """
+# Test on straight tiff
+from opensr_utils import windowed_SR_and_saving
+file_path = "/data1/simon/datasets/val_s2_tiles/xai_testing/stacked_10m.tif"
+sr_obj = windowed_SR_and_saving(file_path, window_size=(128, 128), factor=4, keep_lr_stack=True,mode="SR")
+sr_obj.start_super_resolution(band_selection="10m",model=model_10m,forward_call="forward",overlap=20, eliminate_border_px=0)
+
+
+
 # 2. perform SR with utils package
 from opensr_utils import windowed_SR_and_saving
 # create object that holds window coordinates etc

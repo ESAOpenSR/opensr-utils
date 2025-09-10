@@ -72,7 +72,7 @@ class windowed_SR_and_saving():
             self.input_file_path = self.folder_path
 
 
-    def create_and_save_placeholder_SR_files(self,info_dict,out_name):
+    def create_and_save_placeholder_SR_files(self, info_dict,out_name):
         """
         Saves a georeferenced placeholder SR file in the input folder.
         """
@@ -581,7 +581,7 @@ class windowed_SR_and_saving():
                 "batch_size": 24,
                 "prefetch_factor": 4,
                 "accelerator": "gpu",
-                "devices": 1,
+                "devices": -1,
                 "strategy": "ddp",
                 "custom_steps": custom_steps,
                 "mode": self.mode,
