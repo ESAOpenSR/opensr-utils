@@ -13,7 +13,6 @@ images_other/
 *.pt
 *.ckpt
 *.safetensors
-*.png
 *.json
 images/
 images/*
