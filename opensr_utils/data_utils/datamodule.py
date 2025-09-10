@@ -54,6 +54,16 @@ class PredictionDataset(Dataset):
         return len(self.windows)
 
     def __getitem__(self, idx):
+        # Get metadata of this datapoint and carry over
+        win = self.windows[idx]
+        meta = {
+        "row_off": int(win.row_off),
+        "col_off": int(win.col_off),
+        "height":  int(win.height),
+        "width":   int(win.width),
+        "index":   int(idx),
+}
+        
         # Get image window from file depending on input type
         if self.input_type == "file":
             img = self.get_from_file(idx)
@@ -62,16 +72,14 @@ class PredictionDataset(Dataset):
         elif self.input_type == "S2GM":
             img = self.get_from_S2GM(idx)
         else:
-            raise NotImplementedError(f"Input type {self.input_type} not supported.")
-        
+            raise NotImplementedError(f"Input type {self.input_type} not supported.")    
         # perform normalizations here
         img = img / 10000.0  # Scale to [0,1] assuming input is in [0,10000]
         img = torch.clamp(img, 0.0, 1.0)
         # dtype to float32
         img = img.type(torch.float32)
-        
         # return batch image
-        return img
+        return {"image": img, "meta": meta}
     
     def get_from_file(self, idx):
         """

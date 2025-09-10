@@ -1,15 +1,19 @@
-# general imports
-import rasterio
-from einops import rearrange
-from rasterio.transform import Affine
-import numpy as np
+# torch stuff
 import torch
-from tqdm import tqdm
-import os
 from pytorch_lightning import LightningModule,Trainer
-import pytorch_lightning
+torch.set_float32_matmul_precision('medium')
+
+# general imports
+from einops import rearrange
+from tqdm import tqdm
+import numpy as np
 import random
 import json
+import os
+
+# Geo
+import rasterio
+from rasterio.transform import Affine
 
 # local imports
 from opensr_utils.data_utils.writing_utils import write_to_placeholder
@@ -328,6 +332,7 @@ if __name__ == "__main__":
                  overlap=8,
                  eliminate_border_px=0,
                  device="cuda",
-                 gpus=[0,1,2,3])
+                 gpus=[0,1,2,3]
+                 )
     o.start_super_resolution(debug=True)
     
