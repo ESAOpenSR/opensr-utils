@@ -67,7 +67,7 @@ In order to avoid patching artifacts that are present in many SR products, we pe
 ![img3](resources/overlay_weights.png)
 ![img4](resources/overlay_matrix.png)
 
-Example of Patching Artifacts in other SR models:
+Example of Patching Artifacts in other SR models:  
 ![img5](resources/artifact_example.png)
 
 
