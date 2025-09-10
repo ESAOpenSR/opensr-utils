@@ -10,7 +10,7 @@ from pytorch_lightning import LightningModule
 import pytorch_lightning
 import random
 
-# local imports
+# local importse
 from opensr_utils.denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
 from opensr_utils.stretching import hq_histogram_matching
 from opensr_utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
@@ -19,143 +19,150 @@ from opensr_utils.weighted_overlap import weighted_overlap
 from opensr_utils.utils import SuppressPrint
 
 
-class windowed_SR_and_saving():
+class large_file_processing():
     
-    def __init__(self, folder_path, window_size=(128, 128), factor=4, keep_lr_stack=True, mode="SR"):
-        """
-        Class that performs windowed super-resolution on a Sentinel-2 image and saves the result. Steps:
-        - Copies the 10m and 20m bands to new tiff files in the input directory.
-        - 10m and 20m bands can be called separately and preformed with different models.
-        - SR Results are saved with an averaged overlap and georeferenced in the input folder.
-
-        Inputs:
-            - folder_path (string): path to folder containing S2 SAFE data format
-            - window_size (tuple): window size of the LR image
-            - factor (int): SR factor
-            - keep_lr_stack (bool): decide wether to delete the LR stack after SR is done
-            - custom_steps (int): number of steps to perform for Diffusion models
-
-        Outputs:
-            - None
-
-        Functions:
-            - start_super_resolution: starts the super-resolution process. Takes model and band selection as inputs.
-              Call this separately for 10m or 20m bands, sequentially
-            - delete_LR_stack: deletes the LR stack after SR is done, call if not selected to do it automatically.
-
-        Usage Example:
-            # create instance of class
-            sr_obj = windowed_SR_and_saving(folder_path,keep_lr_stack=True)
-            # perform super-resolution on 20m bands
-            sr_obj.start_super_resolution(band_selection="20m",model=model,forward_call="forward",custom_steps=100)
-            # perform super-resolution on 10m bands
-            sr_obj.start_super_resolution(band_selection="10m",model=model,forward_call="forward",custom_steps=100)
-            # delete LR stack
-            sr_obj.delete_LR_stack()
-        """
+    def __init__(self,
+                 input_type: str, 
+                 root: str,
+                 model=None,
+                 window_size:tuple=(128, 128),
+                 factor:int=4,
+                 overlap:int=8):
+        
+        # First, do some asserts to make sure input is valid
+        assert input_type in ["folder","file"], "input_type not in must be either 'folder' or 'file'"
+        assert os.path.exists(root), "Input folder/file path does not exist"
+        assert model==None or isinstance(model, LightningModule), "Model must be a PyTorch Lightning Module or None"
 
         # General Settings
-        self.folder_path = folder_path # path to folder containing S2 SAFE data format
+        self.input_type = input_type # folder or file
+        self.root = root # path to folder containing S2 SAFE data format
+        self.model = model # pytorch lightning model
         self.window_size = window_size # window size of the LR image
         self.factor = factor # sr factor of the model
-        self.hist_match = False # wether we want to perform hist matching here
-        self.keep_lr_stack = keep_lr_stack # decide wether to delete the LR stack after SR is done
-        self.mode = mode # select SR or uncertainty calculation
+        self.overlap = overlap # overlap in px of the LR image windows
+        self.placeholder_path = None # gets filled by verify_input_file_type
 
-        # check that folder path exists, and that it's the correct type
-        assert os.path.exists(self.folder_path), "Input folder/file path does not exist"
-        assert self.mode in ["SR","xAI","Metrics"], "Mode not in ['SR','xAI','Metrics']"
-        print("Working in ",self.mode,"mode!")
+        # Verifying type of input: file, SAFE or S2GM folder
+        self.verify_input_file_type(input_type)
+        
+        # Get Image information based on input, including image coordinate windows
+        self.get_image_meta(self.root)
 
-        from opensr_utils.utils import can_read_directly_with_rasterio
-        if can_read_directly_with_rasterio(self.folder_path) == True:
-            self.input_file_path = self.folder_path
+        # Create LR placeholder file
+        self.create_placeholder_file()
+        
 
+    def verify_input_file_type(self, input_type):
+        # Verifying type of input: file, SAFE or S2GM folder
+        if input_type=="file":
+            from opensr_utils.utils import can_read_directly_with_rasterio
+            self.placeholder_path = os.path.dirname(self.root)
+            if can_read_directly_with_rasterio(self.root) == False:
+                raise NotImplementedError("Input is a file. File type can not be opened by 'rasterio'.")
+        elif input_type=="folder":
+            self.placeholder_path = self.root
+            if self.root.replace("/","")[-5:] == ".SAFE":
+                print("Input is Sentinel-2 .SAFE folder, processing possible.")
+                self.input_type = "SAFE"
+            elif "S2GM" in self.root:
+                print("Input is Sentinel-2 S2GM folder, processing possible.")
+                self.input_type = "S2GM"
+            else:
+                raise NotImplementedError("Input folder is not in .SAFE format or S2GM format. Please provide a valid input folder.")
+        
+    def get_image_meta(self, root_dir):
+        self.image_meta = {}
+        if self.input_type == "file":
+            with rasterio.open(root_dir) as src:
+                self.image_meta["width"], self.image_meta["height"], self.image_meta["dtype"] = src.width, src.height, src.dtypes[0]
+                self.image_meta["transform"] = src.transform
+                self.image_meta["crs"] = src.crs
+                self.image_meta["bands"] = src.count
 
-    def create_and_save_placeholder_SR_files(self, info_dict,out_name):
-        """
-        Saves a georeferenced placeholder SR file in the input folder.
-        """
-        # create placeholder tensor in memory
-        # If we're in xAI, we only need and want 1 band of SR
-        if self.mode=="xAI":
-            no_bands = 1
-        if self.mode=="SR":
-            no_bands = len(info_dict["bands"])    
-        # create tensor
+        elif self.input_type == "SAFE":
+                files_ls = []   
+                for root, dirs, files in os.walk(root_dir):
+                    for file in files:
+                        if file.endswith('.jp2'):
+                            if any(band in file for band in ["B04","B03","B02","B08",]):
+                                full_path = os.path.join(root, file)
+                                if "IMG_DATA" in full_path:
+                                    files_ls.append(full_path)
+                image_files = {"R":[file for file in files_ls if "B04" in file][0],
+                            "G":[file for file in files_ls if "B03" in file][0],
+                            "B":[file for file in files_ls if "B02" in file][0],
+                            "NIR":[file for file in files_ls if "B08" in file][0]}
+                with rasterio.open(image_files["R"]) as src:
+                    self.image_meta["width"], self.image_meta["height"], self.image_meta["dtype"] = src.width, src.height, src.dtypes[0]
+                    self.image_meta["transform"] = src.transform
+                    self.image_meta["crs"] = src.crs
+                    self.image_meta["bands"] = len(image_files)
+        
+        elif self.input_type == "S2GM":
+            band_names = ["B04.tif","B03.tif","B02.tif","B08.tif",]
+            tif_files = [os.path.join(root_dir, f) for f in os.listdir(root_dir) if f.lower().endswith(".tif")]
+            tif_files = [f for f in tif_files if os.path.basename(f) in band_names]
+            with rasterio.open(tif_files[0]) as src:
+                self.image_meta["width"] = src.width
+                self.image_meta["height"] = src.height
+                self.image_meta["dtype"] = src.dtypes[0]
+                self.image_meta["transform"] = src.transform
+                self.image_meta["crs"] = src.crs
+                self.image_meta["bands"] = len(tif_files)
+                
+        # finally, add image windows to metadata
+        self.image_meta["image_windows"] = self.create_image_windows()
+
+        
+    def create_placeholder_file(self):
+        out_name = "sr_placeholder.tif"
+        output_file_path = os.path.join(self.placeholder_path, out_name)
+        if os.path.exists(output_file_path): 
+            print("Placeholder file already exists at:",output_file_path,". Using existing file.")
+            return
+        else:
+            print("Creating placeholder file at:",output_file_path)
+        
+        no_bands = self.image_meta["bands"]    
         sr_tensor_placeholder = np.zeros((no_bands, 
-                                               info_dict["img_width"]*self.factor,
-                                               info_dict["img_height"]*self.factor),dtype=info_dict["dtype"])
+                                               self.image_meta["width"]*self.factor,
+                                               self.image_meta["height"]*self.factor),dtype=self.image_meta["dtype"])
         
-        # change geotransform to reflect smaller SR pixel size
-        save_transform = Affine(
-                info_dict["geo_transform"].a / self.factor, 
-                info_dict["geo_transform"].b, 
-                info_dict["geo_transform"].c, 
-                info_dict["geo_transform"].d, 
-                info_dict["geo_transform"].e / self.factor, 
-                info_dict["geo_transform"].f
+        save_transform = Affine(        # change geotransform to reflect smaller SR pixel size
+                self.image_meta["transform"].a / self.factor, 
+                self.image_meta["transform"].b, 
+                self.image_meta["transform"].c, 
+                self.image_meta["transform"].d, 
+                self.image_meta["transform"].e / self.factor, 
+                self.image_meta["transform"].f
             )
-
-        # create Metadata for rasterio saveing
-        meta = {
+        meta = {        # create Metadata for rasterio saveing
         'driver': 'GTiff',
-        'dtype': info_dict["dtype"],  # Ensure dtype matches your array's dtype
+        'dtype': self.image_meta["dtype"],  # Ensure dtype matches your array's dtype
         'nodata': None,  # Set to your no-data value, if applicable
-        'width': info_dict["img_width"]*self.factor,
-        'height': info_dict["img_height"]*self.factor,
+        'width': self.image_meta["width"]*self.factor,
+        'height': self.image_meta["height"]*self.factor,
         'count': no_bands,  # Number of bands; adjust if your array has multiple bands
-        'crs': info_dict["crs"],  # CRS (Coordinate Reference System); set as needed
-        'transform': save_transform,  # Adjust as needed
+        'crs': self.image_meta["crs"],  # CRS (Coordinate Reference System); set as needed
+        'transform': save_transform, 
                 }
+        with rasterio.open(output_file_path, 'w', **meta) as dst:
+            for band in range(sr_tensor_placeholder.shape[0]):
+                dst.write(sr_tensor_placeholder[band, :, :], band + 1)
+        print(f"Saved empty placeholder file w/ geotransform. File Size: {os.path.getsize(output_file_path) / (1024 * 1024):.2f} MB")
+        self.placeholder_path = output_file_path
 
-
-        # work with file lock in order to not do this multiple times during Multi-GPU inference
-        # Attempt to acquire an exclusive lock on a temporary lock file
-        import os
-        import fcntl
-        output_file_path = os.path.join(self.folder_path,out_name)
-        lock_file_path = output_file_path + ".lock"
-        with open(lock_file_path, 'w') as lock_file:
-            try:
-                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                # This block now runs only in the process that acquired the lock
-                if os.path.exists(output_file_path): # remove file if it exists
-                    print("Placeholder file found, skipping creation...")
-                    #os.remove(output_file_path)
-                    #print("Overwriting existing placeholder file...")
-                if not os.path.exists(output_file_path): # create file
-                    # FILE CREATION LOGIC -----------------------------------------------------------------------
-                    # Create and write SR placeholder to the raster file
-                    with rasterio.open(os.path.join(self.folder_path,out_name), 'w', **meta) as dst:
-                        # Assuming 'your_array' is 2D, write it to the first band
-                        for band in range(sr_tensor_placeholder.shape[0]):
-                            dst.write(sr_tensor_placeholder[band, :, :], band + 1)
-                    print("Saved empty placeholder SR image at: ",os.path.join(self.folder_path,out_name))
-                    # END FILE CREATION LOGIC -------------------------------------------------------------------
-                fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
-            except IOError:
-                # Another process has the lock; skip file creation
-                pass
-        # delete the lock file
-        #os.remove(lock_file_path)
-
-        # return file path of placeholder
-        return os.path.join(self.folder_path,out_name)
-        
-    
-    def create_window_coordinates_overlap(self,info_dict):
+    def create_image_windows(self):
         """
         Creates a list of window coordinates for the input image. The windows overlap by a specified amount.
         Output type is a list of rasterio.windows.Window objects.
         """
         # get amount of overlap
-        overlap = info_dict["overlap"]
-        
+        overlap = self.overlap
         # Calculate the number of windows in each dimension
-        n_windows_x = (info_dict["img_width"] - overlap) // (self.window_size[0] - overlap)
-        n_windows_y = (info_dict["img_height"] - overlap) // (self.window_size[1] - overlap)
-
+        n_windows_x = (self.image_meta["width"] - overlap) // (self.window_size[0] - overlap)
+        n_windows_y = (self.image_meta["height"] - overlap) // (self.window_size[1] - overlap)
         # Create list of batch windows coordinates
         window_coordinates = []
         for win_y in range(n_windows_y):
@@ -170,15 +177,15 @@ class windowed_SR_and_saving():
                 window_coordinates.append(window)
 
         # Check for any remaining space after the sliding window approach
-        final_x = info_dict["img_width"] - self.window_size[0]
-        final_y = info_dict["img_height"] - self.window_size[1]
+        final_x = self.image_meta["width"] - self.window_size[0]
+        final_y = self.image_meta["height"] - self.window_size[1]
 
         # Add extra windows for the edges if there's remaining space
         # Adjust the check to handle the overlap correctly
         if final_x % (self.window_size[0] - overlap) > 0:
             for win_y in range(n_windows_y):
                 window = rasterio.windows.Window(
-                    info_dict["img_width"] - self.window_size[0],
+                    self.image_meta["width"] - self.window_size[0],
                     win_y * (self.window_size[1] - overlap),
                     self.window_size[0],
                     self.window_size[1]
@@ -189,7 +196,7 @@ class windowed_SR_and_saving():
             for win_x in range(n_windows_x):
                 window = rasterio.windows.Window(
                     win_x * (self.window_size[0] - overlap),
-                    info_dict["img_height"] - self.window_size[1],
+                    self.image_meta["height"] - self.window_size[1],
                     self.window_size[0],
                     self.window_size[1]
                 )
@@ -199,8 +206,8 @@ class windowed_SR_and_saving():
         if (final_x % (self.window_size[0] - overlap) > 0 and
                 final_y % (self.window_size[1] - overlap) > 0):
             window = rasterio.windows.Window(
-                info_dict["img_width"] - self.window_size[0],
-                info_dict["img_height"] - self.window_size[1],
+                self.image_meta["width"] - self.window_size[0],
+                self.image_meta["height"] - self.window_size[1],
                 self.window_size[0],
                 self.window_size[1]
             )
@@ -208,7 +215,6 @@ class windowed_SR_and_saving():
 
         # Return filled list of coordinates
         return window_coordinates
-    
     
     def get_window(self,idx,info_dict):
         """
@@ -295,7 +301,6 @@ class windowed_SR_and_saving():
             for band in range(sr.shape[0]):
                 dst.write(sr[band, :, :], band + 1, window=sr_file_window)
 
-    
     def super_resolute_bands(self,info_dict,model=None,forward_call="forward",custom_steps=100):
         
         """
@@ -412,7 +417,6 @@ class windowed_SR_and_saving():
         interval_size = srs_stdev*2
         interval_size = interval_size.mean(dim=0).unsqueeze(0)
         return interval_size
-
     
     def initialize_info_dicts(self,band_selection="10m",overlap=8, eliminate_border_px=0):
         import os
@@ -546,7 +550,6 @@ class windowed_SR_and_saving():
                 self.b20m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b20m_info,out_name=out_name)
             info_dict = self.b20m_info
             return(info_dict)
-
     
     def start_super_resolution(self,band_selection="10m",model=None, forward_call="forward", custom_steps=100, overlap=8, eliminate_border_px=0):
         print("Reminder: working in ",self.mode,"mode!")
@@ -613,8 +616,6 @@ class windowed_SR_and_saving():
         if not self.keep_lr_stack:
             self.delete_LR_stack(info_dict)
 
-
-
     def start_metric_calculation(self,band_selection="10m",model=None, forward_call="forward", custom_steps=200):
         raise NotImplementedError("Metrics calculation currently unavailable.")
     
@@ -659,7 +660,15 @@ class windowed_SR_and_saving():
             return(None)
         
         
-       
+if __name__ == "__main__":
+    path = "/data2/simon/mosaic/Q10_20240701_20240930_Global-S2GM-m36p8_STD_v2.0.5/S2GM_Q10_20240701_20240930_Global-S2GM-m36p8_STD_v2.0.5/tile_0"
+    o = large_file_processing(input_type="folder", 
+                 root=path,
+                 model=None,
+                 window_size=(128, 128),
+                 factor=4)
+
+
 
 from torch.utils.data import Dataset, DataLoader
 class windowed_SR_and_saving_dataset(Dataset):
@@ -696,3 +705,6 @@ class windowed_SR_and_saving_dataset(Dataset):
         im = self.sr_obj.get_window(idx,self.info_dict)
         im = im.float()
         return(im)
+
+
+
