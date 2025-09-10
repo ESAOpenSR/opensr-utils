@@ -11,12 +11,12 @@ import pytorch_lightning
 import random
 
 # local importse
-from opensr_utils.denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
-from opensr_utils.stretching import hq_histogram_matching
-from opensr_utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
-from opensr_utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S2_folder
-from opensr_utils.weighted_overlap import weighted_overlap
-from opensr_utils.utils import SuppressPrint
+#from opensr_utils.denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
+#from opensr_utils.stretching import hq_histogram_matching
+#from opensr_utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
+#from opensr_utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S2_folder
+#from opensr_utils.weighted_overlap import weighted_overlap
+#from opensr_utils.utils import SuppressPrint
 
 
 class large_file_processing():
@@ -41,7 +41,9 @@ class large_file_processing():
         self.window_size = window_size # window size of the LR image
         self.factor = factor # sr factor of the model
         self.overlap = overlap # overlap in px of the LR image windows
-        self.placeholder_path = None # gets filled by verify_input_file_type
+        # ---
+        self.placeholder_path = None # gets filled by create_placeholder_file
+        self.temp_folder = None # gets filled by create_placeholder_file
 
         # Verifying type of input: file, SAFE or S2GM folder
         self.verify_input_file_type(input_type)
@@ -52,6 +54,17 @@ class large_file_processing():
         # Create LR placeholder file
         self.create_placeholder_file()
         
+        # Create Datamodule based on input files and Windows
+        self.create_datamodule()
+        
+
+    def create_datamodule(self):
+        from opensr_utils.data_utils.datamodule import PredictionDataModule
+        dm = PredictionDataModule(input_type=self.input_type,
+                              root=self.root,
+                              windows = self.image_meta["image_windows"])
+        dm.setup()
+        self.datamodule = dm
 
     def verify_input_file_type(self, input_type):
         # Verifying type of input: file, SAFE or S2GM folder
@@ -60,6 +73,8 @@ class large_file_processing():
             self.placeholder_path = os.path.dirname(self.root)
             if can_read_directly_with_rasterio(self.root) == False:
                 raise NotImplementedError("Input is a file. File type can not be opened by 'rasterio'.")
+            else:
+                print("Input is a file, can be opened with rasterio, processing possible.")
         elif input_type=="folder":
             self.placeholder_path = self.root
             if self.root.replace("/","")[-5:] == ".SAFE":
@@ -113,46 +128,65 @@ class large_file_processing():
                 
         # finally, add image windows to metadata
         self.image_meta["image_windows"] = self.create_image_windows()
-
         
     def create_placeholder_file(self):
+        # 1. Create placeholder file path variable
         out_name = "sr_placeholder.tif"
         output_file_path = os.path.join(self.placeholder_path, out_name)
-        if os.path.exists(output_file_path): 
-            print("Placeholder file already exists at:",output_file_path,". Using existing file.")
-            return
+        
+        # 2. Creating temporary folder for storing batches during prediction
+        temp_folder_path = os.path.join(os.path.dirname(output_file_path),"temp")
+        os.makedirs(temp_folder_path, exist_ok=True)
+        self.temp_folder = temp_folder_path
+        print("Created temporary folder at:",temp_folder_path)
+        
+        # 3. Create placeholder file if it does not exist yet, otherwise skip
+        if os.path.exists(output_file_path):
+            print(f"Placeholder already exists: {output_file_path}")
+            self.placeholder_path = output_file_path
+        
+        # 4. If it does not exist, create it
         else:
-            print("Creating placeholder file at:",output_file_path)
-        
-        no_bands = self.image_meta["bands"]    
-        sr_tensor_placeholder = np.zeros((no_bands, 
-                                               self.image_meta["width"]*self.factor,
-                                               self.image_meta["height"]*self.factor),dtype=self.image_meta["dtype"])
-        
-        save_transform = Affine(        # change geotransform to reflect smaller SR pixel size
-                self.image_meta["transform"].a / self.factor, 
-                self.image_meta["transform"].b, 
-                self.image_meta["transform"].c, 
-                self.image_meta["transform"].d, 
-                self.image_meta["transform"].e / self.factor, 
-                self.image_meta["transform"].f
-            )
-        meta = {        # create Metadata for rasterio saveing
-        'driver': 'GTiff',
-        'dtype': self.image_meta["dtype"],  # Ensure dtype matches your array's dtype
-        'nodata': None,  # Set to your no-data value, if applicable
-        'width': self.image_meta["width"]*self.factor,
-        'height': self.image_meta["height"]*self.factor,
-        'count': no_bands,  # Number of bands; adjust if your array has multiple bands
-        'crs': self.image_meta["crs"],  # CRS (Coordinate Reference System); set as needed
-        'transform': save_transform, 
-                }
-        with rasterio.open(output_file_path, 'w', **meta) as dst:
-            for band in range(sr_tensor_placeholder.shape[0]):
-                dst.write(sr_tensor_placeholder[band, :, :], band + 1)
-        print(f"Saved empty placeholder file w/ geotransform. File Size: {os.path.getsize(output_file_path) / (1024 * 1024):.2f} MB")
-        self.placeholder_path = output_file_path
+            print(f"Creating placeholder: {output_file_path}")
+            nb = int(self.image_meta["bands"])
+            W  = int(self.image_meta["width"]  * self.factor)
+            H  = int(self.image_meta["height"] * self.factor)
+            tr = self.image_meta["transform"]
+            save_transform = Affine(tr.a / self.factor, tr.b, tr.c, tr.d, tr.e / self.factor, tr.f)
 
+            profile = { # define profile for output file
+                "driver": "GTiff",
+                "dtype": self.image_meta["dtype"],
+                "count": nb,
+                "width": W,
+                "height": H,
+                "crs": self.image_meta["crs"],
+                "transform": save_transform,
+                "compress": "deflate",
+                "tiled": True,
+                "blockxsize": 512,
+                "blockysize": 512,
+                "bigtiff": "IF_SAFER",
+                "sparse_ok": True,  # rasterio passes SPARSE_OK when present in profile >=1.3
+            }
+            # Create the dataset and close without writing any pixels
+            with rasterio.open(output_file_path, "w", **profile):
+                pass
+            """
+            with rasterio.open(output_file_path, "w", **profile) as dst:
+                block_h, block_w = dst.block_shapes[0]      # (rows, cols)
+                zeros_block = np.zeros((nb, block_h, block_w), dtype=dst.dtypes[0])
+
+                for row in tqdm(range(0, H, block_h),desc="Writing placeholder file ..."):
+                    h = min(block_h, H - row)
+                    for col in range(0, W, block_w):
+                        w = min(block_w, W - col)
+                        window = rasterio.windows.Window(col_off=col, row_off=row, width=w, height=h)
+                        dst.write(zeros_block[:, :h, :w], window=window)
+            """
+
+            print(f"Saved empty placeholder SR image at: {output_file_path}")
+        
     def create_image_windows(self):
         """
         Creates a list of window coordinates for the input image. The windows overlap by a specified amount.
@@ -667,16 +701,21 @@ if __name__ == "__main__":
                  model=None,
                  window_size=(128, 128),
                  factor=4)
+    
+    # test dataset class
+    ds = o.datamodule.dataset
+    img = ds.__getitem__(-1)
+    print(img.mean(),img.shape)
+    # test dataset dataloader
+    dl = o.datamodule.predict_dataloader()
+    for batch in dl:
+        print(batch.mean(), batch.shape)
+        break
 
-
-
+"""
 from torch.utils.data import Dataset, DataLoader
 class windowed_SR_and_saving_dataset(Dataset):
-    """
-    This wraps aroudn the object class to profit from
-    the multi-threaded approach of Lightning and to 
-    embedd it in the workflow with a PL SR model.
-    """
+   
     def __init__(self, folder_path, **kwargs):
         band_selection = kwargs.get('band_selection', "10m")
         overlap = kwargs.get('overlap', 40)
@@ -708,3 +747,4 @@ class windowed_SR_and_saving_dataset(Dataset):
 
 
 
+"""
