@@ -6,9 +6,10 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import os
-from pytorch_lightning import LightningModule
+from pytorch_lightning import LightningModule,Trainer
 import pytorch_lightning
 import random
+import json
 
 # local imports
 from opensr_utils.data_utils.writing_utils import write_to_placeholder
@@ -31,7 +32,10 @@ class large_file_processing():
                  window_size:tuple=(128, 128),
                  factor:int=4,
                  overlap:int=8,
-                 eliminate_border_px=0):
+                 eliminate_border_px=0,
+                 device:str="cpu",
+                 gpus: int = 1 or list,
+                 ):
         
         # First, do some asserts to make sure input is valid
         assert input_type in ["folder","file"], "input_type not in must be either 'folder' or 'file'"
@@ -45,6 +49,11 @@ class large_file_processing():
         self.factor = factor # sr factor of the model
         self.overlap = overlap # overlap in px of the LR image windows
         self.eliminate_border_px = eliminate_border_px # border pixels to eliminate in px on each side of the SR image
+        self.device = device # device to run model on
+        if type(gpus) == int: # pass GPU/s to Trainer as list
+            self.gpus = [gpus] # number of gpus or list of gpu ids to use
+        else:
+            self.gpus = gpus
         # ---
         self.placeholder_path = None # gets filled by create_placeholder_file
         self.temp_folder = None # gets filled by create_placeholder_file
@@ -62,7 +71,10 @@ class large_file_processing():
         self.create_datamodule()
         
         # Make sure model is useable and in eval mode
-        self.model = preprocess_model(model)
+        self.model = preprocess_model(model,
+                                      temp_folder=self.temp_folder,
+                                      windows=self.image_meta["image_windows"],
+                                      factor=self.factor)
 
         print("\n")
         print("Status: Model and Data ready for inference.")
@@ -265,10 +277,46 @@ class large_file_processing():
         os.remove(self.temp_folder)
         print("Deleted stacked image at",self.temp_folder)
 
-    def start_super_resolution(self,debug=False):
-        pass
+    def start_super_resolution(self, debug: bool = False):
+        """
+        Run SR inference and stream predictions to disk (temp/*.npy) via model hooks.
+        If debug=True, process only the first 100 LR windows total (DDP-safe).
+        """
+        # Pick windows (debug trims to first 100 globally; DDP sampler will shard those across ranks)
+        windows_all = self.image_meta["image_windows"]
+        windows_run = windows_all[:100] if debug else windows_all
 
-        
+        # Rebuild a datamodule for this run (debug-safe) and update model hook context
+        dm = PredictionDataModule(input_type=self.input_type, root=self.root, windows=windows_run)
+        dm.setup()
+
+        # Hand the hook context to the model (these are consumed inside predict_step)
+        self.model._save_temp_folder = self.temp_folder
+        self.model._save_windows     = windows_run
+        self.model._save_factor      = int(self.factor)
+
+        # Trainer config: no logging/checkpointing; DDP handled automatically if multiple GPUs
+        trainer = Trainer(
+            accelerator=self.device,
+            devices=self.gpus,
+            logger=False,
+            enable_checkpointing=False,
+            enable_model_summary=False,
+            inference_mode=True,           # no_grad + eval
+            # precision="16-mixed",        # uncomment if your model supports AMP
+        )
+
+        # Stream predictions to disk inside predict_step (we return None there to avoid gathers)
+        trainer.predict(self.model, datamodule=dm, return_predictions=False)
+
+        # Rank-aware status message
+        is_ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
+        rank = torch.distributed.get_rank() if is_ddp else 0
+        if rank == 0:
+            print(f"Prediction complete. Tiles saved in: {self.temp_folder}")
+            if debug:
+                print("Debug mode was ON → processed only 100 windows.")
+
         
 if __name__ == "__main__":
     path = "/data2/simon/mosaic/Q10_20240701_20240930_Global-S2GM-m36p8_STD_v2.0.5/S2GM_Q10_20240701_20240930_Global-S2GM-m36p8_STD_v2.0.5/tile_0"
@@ -278,12 +326,8 @@ if __name__ == "__main__":
                  window_size=(128, 128),
                  factor=4,
                  overlap=8,
-                 eliminate_border_px=0)
-    o.start_super_resolution()
+                 eliminate_border_px=0,
+                 device="cuda",
+                 gpus=[0,1,2,3])
+    o.start_super_resolution(debug=True)
     
-    
-    test_data = False
-    if test_data:
-        ds = o.datamodule.dataset
-        img = ds.__getitem__(-1)
-        print(img.mean(),img.shape)
