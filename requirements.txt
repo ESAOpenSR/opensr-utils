@@ -1,7 +1,28 @@
-rasterio
-einops
-rasterio
+# Core scientific stack
 numpy
-torch
+scipy
+pandas
+
+# Deep learning
+torch>=2.0.0
+torchvision
+pytorch-lightning>=2.0.0
+
+# Geospatial I/O
+rasterio
+GDAL
+shapely
+
+# Utilities
 tqdm
-os
+glob2
+einops
+omegaconf
+pyyaml
+
+# Visualization & debugging
+matplotlib
+seaborn
+
+# Project packages (installed via PyPI or editable mode if local)
+opensr-model>=1.0.0
