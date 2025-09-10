@@ -48,8 +48,8 @@ model.load_pretrained(config.ckpt_version) # load checkpoint
 ```python
 
 #
-import opensr_model
-sr_object = opensr_model.large_file_processing( 
+import opensr_utils
+sr_object = opensr_utils.large_file_processing( 
 				root=path, # File or Folder path
 				model=None, # your SR model
 				window_size=(128, 128), # LR window size for patching
