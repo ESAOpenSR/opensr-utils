@@ -6,9 +6,11 @@ Only the combination of overlap:40 and eliminate_pixel:20 is proven to work. Set
   
   
 *UPDATE*  
-The current version supports PyTorch Lightning multi-GPU inference, but the documentation hasnt updated yet.
+The current version supports PyTorch Lightning multi-GPU inference, but the documentation isn't updated yet.
   
   
+![img1](resources/utils_poster.png)
+
 
 *Description*  
 This package performs super-resolution with any PyTorch or PyTorch lighning model for Sentinel-2 10m and 20m bands.  
@@ -21,11 +23,14 @@ Funcitonalities:
 	- Patching of input images by selectable size (eg 128x128)
 	- Super-Resolution of individual patches with provided model
 	- writing of georeferenced output raster
-	- overlapping and linear weightning of patches by selectable quantity to reduce patching artifacts
+	- overlapping and linear weightning of patches by selectable quantity to reduce patching artifacts - See image
 	- Processing is performed on the same device as the model that is passed to the funciton
 - Supported Models:  
 	- 'torch.nn.Module': Any SR model with a .forward() function can be passed. The drawback is that for this model type, multi-GPU and multi-batch processing is not supported. This is therefore considerably slower.
 	- 'LightningModule': Any PL Lightning model with a .predict() function. If this model type is passed, multi-GPU and multi-batch processing is activated, which lkeads to a significant inference speed increase.
+
+![img2](resources/matrix_poster.png)
+
 
 Usage example:
 ```python
