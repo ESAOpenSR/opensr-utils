@@ -2,7 +2,7 @@
 
 #### 🚀 Fast multi-GPU super-resolution for massive Sentinel-2 imagery 🌍 — seamless weighted blending ✨ removes patch artifacts, while flexible input support (.SAFE 📂, S2GM 🛰️, GeoTIFF 🗺️) makes generating high-quality SR products effortless.
 
-*WARNING*  
+*WARNING*   
 This Repo is currently undergoing major revision!  
 More documentation coming soon!  
 More features coming soon!
@@ -12,7 +12,7 @@ More features coming soon!
 # Description  
 This package performs super-resolution with any PyTorch or PyTorch lighning model for the Sentinel-2 10m bands (R-G-B-NIR).  
 
-### Functionalities:
+### Functionalities: 
 - The Input can be either:  
 	- a **".SAFE"** folder, zipped or unzipped.
 	- a **"S2GM"** folder as available from the S2 Global Mosaic Hub
