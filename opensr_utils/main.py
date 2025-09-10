@@ -24,12 +24,6 @@ from opensr_utils.data_utils.writing_utils import write_to_placeholder as blend_
 from opensr_utils.data_utils.datamodule import PredictionDataModule
 from opensr_utils.model_utils.prepare_model import preprocess_model
 from opensr_utils.data_utils.reading_utils import can_read_directly_with_rasterio
-#from opensr_utils.denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
-#from opensr_utils.stretching import hq_histogram_matching
-#from opensr_utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
-#from opensr_utils.bands20m_stacked_from_S2_folder import extract_20mbands_from_S2_folder
-#from opensr_utils.weighted_overlap import weighted_overlap
-#from opensr_utils.utils import SuppressPrint
 
 
 class large_file_processing():
@@ -44,10 +38,136 @@ class large_file_processing():
                  device:str="cpu",
                  gpus: int = 1 or list,
                  ):
+
+        """
+        High-level pipeline for patch-based super-resolution (SR) on large geospatial
+        raster files.
+
+        This class handles the entire flow of:
+        1. Verifying input type (single file, Sentinel-2 SAFE, or S2GM folder).
+        2. Extracting metadata (dimensions, CRS, transform, band count).
+        3. Generating a list of sliding LR windows with overlap.
+        4. Creating an empty placeholder GeoTIFF at HR resolution.
+        5. Building a PyTorch Lightning datamodule for inference.
+        6. Running SR model predictions on windows, streamed to disk as `.npy`/`.npz`.
+        7. Stitching predictions back into the placeholder with overlap-aware blending.
+        8. Cleaning up temporary files and writing final `sr.tif`.
+
+        The design enables processing of arbitrarily large rasters without exhausting
+        system memory, by relying on tiling, temporary storage, and rasterio’s
+        windowed I/O.
+
+        Parameters
+        ----------
+        root : str
+            Path to the input data. Can be:
+            - A single raster file (readable by rasterio).
+            - A Sentinel-2 SAFE folder (expects JP2 bands B02, B03, B04, B08).
+            - A Sentinel-2 Global Mosaic (S2GM) folder with TIFF bands.
+        model : torch.nn.Module or LightningModule, optional
+            Super-resolution model to run. If None, only preprocessing/placeholder
+            setup is performed.
+        window_size : tuple of int, default=(128, 128)
+            Size of each LR patch to read from disk.
+        factor : int, default=4
+            Upscaling factor for SR model. Must be one of {2,4,6,8}.
+        overlap : int, default=8
+            Amount of overlap (in LR pixels) between adjacent windows.
+        eliminate_border_px : int, default=0
+            Number of pixels at each SR patch border to suppress before feathering.
+            Must be smaller than overlap.
+        device : {"cpu","cuda"}, default="cpu"
+            Device for model inference.
+        gpus : int or list of int, default=1
+            GPU configuration for PyTorch Lightning Trainer. Accepts integer count
+            or explicit device IDs.
+
+        Attributes
+        ----------
+        root : str
+            Path to input file/folder.
+        window_size : tuple
+            LR patch dimensions.
+        factor : int
+            Upscaling factor.
+        overlap : int
+            Overlap size in pixels.
+        eliminate_border_px : int
+            Pixels to suppress at SR patch edges.
+        device : str
+            Inference device.
+        gpus : list of int
+            List of GPU IDs used for Trainer.
+        image_meta : dict
+            Metadata dictionary with keys:
+            - width, height, dtype, crs, transform, bands
+            - image_windows : list of rasterio.windows.Window
+            - placeholder_filepath : str
+            - placeholder_dir : str
+        input_type : {"file","SAFE","S2GM"}
+            Type of input data detected.
+        placeholder_filepath : str
+            Path to the temporary placeholder GeoTIFF for SR results.
+        temp_folder : str
+            Temporary folder for per-patch `.npy`/`.npz` predictions.
+        datamodule : PredictionDataModule
+            Lightning datamodule managing data loading and batching.
+        model : torch.nn.Module
+            Preprocessed SR model set to evaluation mode.
+
+        Methods
+        -------
+        create_datamodule()
+            Build the PredictionDataModule for input windows.
+        verify_input_file_type(root)
+            Identify input as raster file, SAFE folder, or S2GM folder.
+        get_image_meta(root_dir)
+            Extract metadata (dimensions, dtype, CRS, bands) from input.
+        create_placeholder_file()
+            Initialize empty HR GeoTIFF placeholder for stitched results.
+        create_image_windows()
+            Generate overlapping rasterio Windows covering the input image.
+        delete_LR_temp()
+            Delete temporary LR patch folder.
+        start_super_resolution(debug=False)
+            Run inference on all LR windows and save SR patches to temp folder.
+        write_to_file(index_path=None, limit=None)
+            Stitch saved SR patches from temp folder into placeholder GeoTIFF,
+            blend overlaps, clean up, and finalize `sr.tif`.
+
+        Notes
+        -----
+        - Overlap-aware blending uses `opensr_utils.data_utils.writing_utils.write_to_placeholder`.
+        - The pipeline is designed for very large Sentinel-2 mosaics and similar
+        datasets where in-memory inference is not feasible.
+        - Temporary predictions are streamed to disk, avoiding large GPU <-> CPU transfers.
+        - Placeholder is written with ZSTD compression and BigTIFF enabled for large files.
+
+        Example
+        -------
+        >>> o = large_file_processing(
+        ...     root="/data/mosaic/S2_tile.tif",
+        ...     model=my_model,
+        ...     window_size=(128, 128),
+        ...     factor=4,
+        ...     overlap=12,
+        ...     eliminate_border_px=2,
+        ...     device="cuda",
+        ...     gpus=[0]
+        ... )
+        >>> o.start_super_resolution()
+        >>> o.write_to_file()
+        Saved stitched SR image at: /data/mosaic/sr.tif
+        """        
         
         # First, do some asserts to make sure input is valid
         assert os.path.exists(root), "Input folder/file path does not exist"
-        assert model==None or isinstance(model, LightningModule), "Model must be a PyTorch Lightning Module or None"
+        assert model==None or isinstance(model, LightningModule) or isinstance(model, torch.nn.Module), "Model must be a PyTorch, Lightning, or 'None'."
+        assert eliminate_border_px < overlap, "eliminate_border_px must be smaller than overlap, since it is a subset of the overlap area."
+        assert overlap % 2 == 0, "Overlap must be an even integer."
+        assert eliminate_border_px % 2 == 0, "eliminate_border_px must be an even integer."
+        assert overlap-eliminate_border_px >= 4, "overlap must be at least 4 pixels bigger than eliminate_border_px, otherwise there is no point in doing it."
+        assert factor in [2,4,6,8], "Factor must be one of [2,4,6,8]."
 
         # General Settings
         self.root = root # path to folder containing S2 SAFE data format
@@ -60,7 +180,9 @@ class large_file_processing():
             self.gpus = [gpus] # number of gpus or list of gpu ids to use
         else:
             self.gpus = gpus
+            
         # ---
+        # Local variable definitions
         self.image_meta = {} # dict to hold image metadata - gets filled by get_image_meta
         self.input_type = None # file, SAFE or S2GM - gets filled by verify_input_file_type
         self.placeholder_filepath = None # filepath of empty SR placeholder - gets filled by create_placeholder_file
@@ -89,14 +211,33 @@ class large_file_processing():
         print("Status: Model and Data ready for inference.")
         print("Run SR with .start_super_resolution() method.")
 
-    def create_datamodule(self): # Works
+    def create_datamodule(self):
+        """
+        Create a PredictionDataModule for patch-based inference.
+
+        The datamodule wraps the input type, root path, and sliding windows,
+        and handles batching for PyTorch Lightning’s predict loop.
+        """
         dm = PredictionDataModule(input_type=self.input_type,
                               root=self.root,
                               windows = self.image_meta["image_windows"])
         dm.setup()
         self.datamodule = dm
 
-    def verify_input_file_type(self, root): # Works
+    def verify_input_file_type(self, root):
+        """
+        Determine whether input is a single raster file, a SAFE folder, or an S2GM folder.
+
+        - For files: ensures rasterio can open it.
+        - For folders: checks SAFE or S2GM conventions.
+        - Sets `self.input_type` accordingly.
+        - Updates placeholder path in metadata.
+
+        Raises
+        ------
+        NotImplementedError
+            If the input path is not a valid file or recognized folder type.
+        """
         # Check if root is a file or a folder
         if os.path.isfile(root):
             input_type = "file"
@@ -124,7 +265,16 @@ class large_file_processing():
                 raise NotImplementedError("Input folder is not in .SAFE format or S2GM format. Please provide a valid input folder.")
         self.input_type = input_type
         
-    def get_image_meta(self, root_dir): # Works
+    def get_image_meta(self, root_dir):
+        """
+        Extract raster metadata (width, height, dtype, CRS, transform, band count).
+
+        - For files: opens directly with rasterio.
+        - For SAFE: locates JP2 bands B02, B03, B04, B08.
+        - For S2GM: locates GeoTIFF bands B02, B03, B04, B08.
+
+        Adds a list of sliding image windows to `self.image_meta`.
+        """
         if self.input_type == "file":
             with rasterio.open(root_dir) as src:
                 self.image_meta["width"], self.image_meta["height"], self.image_meta["dtype"] = src.width, src.height, src.dtypes[0]
@@ -166,7 +316,17 @@ class large_file_processing():
         # finally, add image windows to metadata
         self.image_meta["image_windows"] = self.create_image_windows()
         
-    def create_placeholder_file(self): # Works - tmp file unconfirmed
+    def create_placeholder_file(self):
+        """
+        Create an empty HR GeoTIFF placeholder for stitched SR results.
+
+        - Output path: `<input_dir>/sr_placeholder.tif`.
+        - Uses ZSTD compression, tiling, and BigTIFF for large file safety.
+        - Applies appropriate transform scaling (factor).
+        - Creates a `temp/` folder alongside placeholder for intermediate patches.
+
+        Skips creation if placeholder already exists.
+        """
         # 1. Create placeholder file path variable
         out_name = "sr_placeholder.tif"
         output_file_path = os.path.join(self.placeholder_path, out_name)
@@ -205,11 +365,13 @@ class large_file_processing():
                 "height": H,
                 "crs": self.image_meta["crs"],
                 "transform": save_transform,
-                "compress": "deflate",
+                "compress": "zstd", # deflate for older versions
+                "zlevel":9,
                 "tiled": True,
                 "blockxsize": 512,
                 "blockysize": 512,
                 "bigtiff": "IF_SAFER",
+                "predictor": 2, # turn this off for older versions
                 "sparse_ok": True,  # rasterio passes SPARSE_OK when present in profile >=1.3
             }
             # Create the dataset and close without writing any pixels
@@ -232,8 +394,16 @@ class large_file_processing():
         
     def create_image_windows(self): # Works
         """
-        Creates a list of window coordinates for the input image. The windows overlap by a specified amount.
-        Output type is a list of rasterio.windows.Window objects.
+        Generate overlapping rasterio Windows covering the input image.
+
+        - Windows are defined at LR scale with specified size and overlap.
+        - Extra windows are added at image borders to ensure full coverage.
+        - Returns a list of rasterio.windows.Window objects.
+
+        Returns
+        -------
+        list of rasterio.windows.Window
+            Coordinates of all LR patches to process.
         """
         # get amount of overlap
         overlap = self.overlap
@@ -294,14 +464,32 @@ class large_file_processing():
         return window_coordinates
     
     def delete_LR_temp(self): # Works for now, ToDo: Check
-        # delete LR stack folder
+        """
+        Delete the temporary folder created for LR patches and intermediate files.
+
+        Cleans up after prediction and stitching.
+        """
         shutil.rmtree(self.temp_folder)
         print("Deleted temp folder at",self.temp_folder)
 
     def start_super_resolution(self, debug: bool = False):
         """
-        Run SR inference and stream predictions to disk (temp/*.npy) via model hooks.
-        If debug=True, process only the first 100 LR windows total (DDP-safe).
+        Run super-resolution inference across all LR windows.
+
+        - Creates a fresh PredictionDataModule for the selected windows.
+        - Passes temp folder and window metadata to the model.
+        - Uses a PyTorch Lightning Trainer to run `predict_step` in inference mode.
+        - Saves SR patches into `temp/` as `.npy`/`.npz`.
+
+        Parameters
+        ----------
+        debug : bool, default=False
+            If True, process only the first 100 windows globally (DDP-safe).
+
+        Notes
+        -----
+        - Multi-GPU support is handled via Lightning DDP.
+        - No checkpoints or logs are created during prediction.
         """
         # Pick windows (debug trims to first 100 globally; DDP sampler will shard those across ranks)
         windows_all = self.image_meta["image_windows"]
@@ -340,9 +528,26 @@ class large_file_processing():
 
     def write_to_file(self, index_path=None, limit=None):
         """
-        Stream SR patches from temp/ to the placeholder GeoTIFF using your blending writer.
-        Uses self.image_meta / self.factor / self.overlap / self.eliminate_border_px for config.
-        Only the per-tile LR windows & paths come from index.json.
+        Stitch saved SR patches from temp/ into the placeholder GeoTIFF.
+
+        - Loads per-window metadata from `index.json`.
+        - Iterates over patch files (`.npy`/`.npz`) in order.
+        - Writes each patch into the placeholder using overlap-aware blending.
+        - Deletes temporary files in batches.
+        - Renames placeholder to `sr.tif` upon completion.
+
+        Parameters
+        ----------
+        index_path : str, optional
+            Path to index.json. Defaults to `<temp_folder>/index.json`.
+        limit : int, optional
+            Maximum number of tiles to process (for debugging/testing).
+
+        Notes
+        -----
+        - Uses `opensr_utils.data_utils.writing_utils.write_to_placeholder`
+        for weighted blending.
+        - Cleans up `temp/` after stitching.
         """
         # 1) load merged index
         if index_path is None:
@@ -413,18 +618,39 @@ class large_file_processing():
         print(f"Stitched {len(entries)} tiles into: {sr_path}")
 
 if __name__ == "__main__":
-    path = "/data2/simon/mosaic/individual_tile/S2_BA_small.tif"
+    path = "/data2/simon/mosaic/individual_tile/S2_BA_smaller.tif"
     o = large_file_processing( 
                  root=path,
                  model=None,
                  window_size=(128, 128),
                  factor=4,
-                 overlap=8,
-                 eliminate_border_px=0,
+                 overlap=12,
+                 eliminate_border_px=2,
                  device="cuda",
                  gpus=[0]
                  )
     o.start_super_resolution(debug=False)
     o.write_to_file()
     
-    
+    """
+    # open file and look at all gdal settings
+    import rasterio
+    with rasterio.open("/data2/simon/mosaic/individual_tile/sr.tif") as src:
+        print(src.profile)
+        print(src.tags())
+        print(src.tags(ns="IMAGE_STRUCTURE"))
+        print(src.tags(ns="TIFF"))
+        print(src.tags(ns="ZSTD"))
+        print(src.compression)
+        print(src.compression.name) 
+        print(src.compression.value)
+        
+    with rasterio.open("/data2/simon/mosaic/individual_tile/S2_BA_smaller.tif") as src:
+        print(src.profile)
+        print(src.tags())
+        print(src.tags(ns="IMAGE_STRUCTURE"))
+        print(src.tags(ns="TIFF"))
+        print(src.tags(ns="ZSTD"))
+        print(src.compression)
+        
+    """

@@ -1,0 +1,113 @@
+Large File SR Processing Workflow
+=================================
+
+User: large_file_processing(root, model, ...)
+--------------------------------------------
+
+   ┌─────────────────────────────┐
+   │ Verify input type (file/SAFE│
+   │ /S2GM)                      │
+   └───────────┬─────────────────┘
+               │
+               ▼
+   ┌─────────────────────────────┐
+   │ Extract metadata:            │
+   │  - width, height, dtype      │
+   │  - CRS, transform, bands     │
+   │  - build sliding windows     │
+   └───────────┬─────────────────┘
+               │
+               ▼
+   ┌─────────────────────────────┐
+   │ Create placeholder GeoTIFF  │
+   │ (HR dimensions, ZSTD, tiled)│
+   └───────────┬─────────────────┘
+               │
+               ▼
+   ┌─────────────────────────────┐
+   │ Build PredictionDataModule  │
+   │ (wraps Dataset of windows)  │
+   └───────────┬─────────────────┘
+               │
+               ▼
+   ┌─────────────────────────────┐
+   │ Preprocess model (wrap in   │
+   │ Lightning + add hooks)      │
+   └───────────┬─────────────────┘
+               │
+               ▼
+   ┌─────────────────────────────┐
+   │ Trainer.predict()           │
+   │ - Each rank runs predict_step│
+   │ - SR patches saved → temp/  │
+   │ - Per-rank index JSONs      │
+   └───────────┬─────────────────┘
+               │
+               ▼
+   ┌─────────────────────────────┐
+   │ On rank 0:                  │
+   │ - Merge shard indices        │
+   │ - Write global index.json    │
+   │ - Clean up temp shards       │
+   └───────────┬─────────────────┘
+               │
+               ▼
+   ┌─────────────────────────────┐
+   │ Stitch patches into         │
+   │ placeholder GeoTIFF:        │
+   │ - Load patch from .npz      │
+   │ - Blend with feathered edges│
+   │ - Write into placeholder    │
+   └───────────┬─────────────────┘
+               │
+               ▼
+   ┌─────────────────────────────┐
+   │ Rename placeholder → sr.tif │
+   │ (final stitched SR image)   │
+   └─────────────────────────────┘
+
+
+
+
+Multi-GPU SR Inference Workflow
+================================
+
+   ┌─────────────┐
+   │ Trainer.run │
+   └──────┬──────┘
+          │
+          ▼
+   ┌─────────────────────────┐
+   │ Each GPU rank executes: │
+   └──────────┬──────────────┘
+              │
+              ▼
+   [on_predict_start]
+        │  Initialize:
+        │   - rank/world_size
+        │   - temp folder
+        │   - local entries[]
+        ▼
+   [predict_step]
+        │  For each batch:
+        │   - Run model (SR patch)
+        │   - Save patch → temp/sr_rXXXX_cXXXX.npz
+        │   - Append offsets + path to entries[]
+        ▼
+   [on_predict_end]
+        │  Write shard index_rank{r}.json
+        │
+        │───► DDP barrier ───(all ranks wait)───┐
+        │                                      │
+        ▼                                      │
+   Rank >0:                                    │ Rank 0:
+   - Finished                                  │  - Collect all shard JSONs
+   - Optionally delete shards                  │  - Merge entries[]
+                                               │  - Deduplicate + sort
+                                               │  - Write global index.json
+                                               │  - Clean up shard files
+                                               ▼
+                                        ┌───────────────┐
+                                        │ index.json    │
+                                        │ (global list) │
+                                        └───────────────┘
