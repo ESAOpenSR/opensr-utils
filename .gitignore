@@ -1,6 +1,7 @@
 *.pth
 *.ckpt
-
+trash/
+images_other/
 
 # images
 *.tif

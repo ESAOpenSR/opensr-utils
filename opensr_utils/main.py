@@ -10,7 +10,10 @@ from pytorch_lightning import LightningModule
 import pytorch_lightning
 import random
 
-# local importse
+# local imports
+from opensr_utils.data_utils.writing_utils import write_to_placeholder
+from opensr_utils.data_utils.datamodule import PredictionDataModule
+from opensr_utils.model_utils.prepare_model import preprocess_model
 #from opensr_utils.denormalize_image_per_band_batch import denormalize_image_per_band_batch as denorm
 #from opensr_utils.stretching import hq_histogram_matching
 #from opensr_utils.bands10m_stacked_from_S2_folder import extract_10mbands_from_S2_folder
@@ -27,7 +30,8 @@ class large_file_processing():
                  model=None,
                  window_size:tuple=(128, 128),
                  factor:int=4,
-                 overlap:int=8):
+                 overlap:int=8,
+                 eliminate_border_px=0):
         
         # First, do some asserts to make sure input is valid
         assert input_type in ["folder","file"], "input_type not in must be either 'folder' or 'file'"
@@ -37,10 +41,10 @@ class large_file_processing():
         # General Settings
         self.input_type = input_type # folder or file
         self.root = root # path to folder containing S2 SAFE data format
-        self.model = model # pytorch lightning model
         self.window_size = window_size # window size of the LR image
         self.factor = factor # sr factor of the model
         self.overlap = overlap # overlap in px of the LR image windows
+        self.eliminate_border_px = eliminate_border_px # border pixels to eliminate in px on each side of the SR image
         # ---
         self.placeholder_path = None # gets filled by create_placeholder_file
         self.temp_folder = None # gets filled by create_placeholder_file
@@ -57,20 +61,26 @@ class large_file_processing():
         # Create Datamodule based on input files and Windows
         self.create_datamodule()
         
+        # Make sure model is useable and in eval mode
+        self.model = preprocess_model(model)
 
-    def create_datamodule(self):
-        from opensr_utils.data_utils.datamodule import PredictionDataModule
+        print("\n")
+        print("Status: Model and Data ready for inference.")
+        print("Run SR with .start_super_resolution() method.")
+
+    def create_datamodule(self): # Works
         dm = PredictionDataModule(input_type=self.input_type,
                               root=self.root,
                               windows = self.image_meta["image_windows"])
         dm.setup()
         self.datamodule = dm
 
-    def verify_input_file_type(self, input_type):
+    def verify_input_file_type(self, input_type): # Works
         # Verifying type of input: file, SAFE or S2GM folder
         if input_type=="file":
             from opensr_utils.utils import can_read_directly_with_rasterio
             self.placeholder_path = os.path.dirname(self.root)
+            self.image_meta["placeholder_path"] = self.placeholder_path
             if can_read_directly_with_rasterio(self.root) == False:
                 raise NotImplementedError("Input is a file. File type can not be opened by 'rasterio'.")
             else:
@@ -86,7 +96,7 @@ class large_file_processing():
             else:
                 raise NotImplementedError("Input folder is not in .SAFE format or S2GM format. Please provide a valid input folder.")
         
-    def get_image_meta(self, root_dir):
+    def get_image_meta(self, root_dir): # Works
         self.image_meta = {}
         if self.input_type == "file":
             with rasterio.open(root_dir) as src:
@@ -129,7 +139,7 @@ class large_file_processing():
         # finally, add image windows to metadata
         self.image_meta["image_windows"] = self.create_image_windows()
         
-    def create_placeholder_file(self):
+    def create_placeholder_file(self): # Works - tmp file unconfirmed
         # 1. Create placeholder file path variable
         out_name = "sr_placeholder.tif"
         output_file_path = os.path.join(self.placeholder_path, out_name)
@@ -187,7 +197,7 @@ class large_file_processing():
 
             print(f"Saved empty placeholder SR image at: {output_file_path}")
         
-    def create_image_windows(self):
+    def create_image_windows(self): # Works
         """
         Creates a list of window coordinates for the input image. The windows overlap by a specified amount.
         Output type is a list of rasterio.windows.Window objects.
@@ -250,448 +260,14 @@ class large_file_processing():
         # Return filled list of coordinates
         return window_coordinates
     
-    def get_window(self,idx,info_dict):
-        """
-        Loads a window of the input image and returns it as a tensor.
-        """
-        # TODO: perform batched SR instead of single image per batch
-        # assert number required is valid
-        assert idx>=0 and idx<len(info_dict["window_coordinates"]), "idx not in range of windows"
-        # get window of current idx
-        current_window = info_dict["window_coordinates"][idx]
-        
-        # open file SRC
-        with rasterio.open(info_dict["lr_path"]) as src:
-            data = src.read(window=current_window)
-            # select bands
-            data = data[info_dict["bands"],:,:]
-        
-        data = data/10000 # bring to 0..1
-        data = torch.from_numpy(data)
-        
-        # return array of window that has been read
-        return(data)
-    
-    def delete_LR_stack(self,info_dict):
+    def delete_LR_temp(self): # Works for now, ToDo: Check
         # delete LR stack
-        os.remove(info_dict["lr_path"])
-        print("Deleted stacked image at",info_dict["lr_path"])
+        os.remove(self.temp_folder)
+        print("Deleted stacked image at",self.temp_folder)
 
-    def delete_lock_files(self):
-        # delete all lock files in the input directory to clean up
-        # Construct the pattern to match all .lock files
-        import glob
-        directory = self.folder_path
-        pattern = os.path.join(directory, '*.lock')
-        
-        # Find all files in the directory matching the pattern
-        lock_files = glob.glob(pattern)
-        
-        # Iterate over the list of file paths & remove each file
-        for file_path in lock_files:
-            try:
-                os.remove(file_path)
-                print(f"Deleted lock file: {file_path}")
-            except OSError as e:
-                print(f"Error deleting lock file: {file_path} : {e.strerror}")
-        
-    def fill_SR_overlap(self, sr, idx, info_dict):
-        """
-        Fills the SR placeholder image with the super-resoluted window at the correct location of the image. Performs windowed writing via rasterio.
-        """
-        # If input not np.array, transform to array
-        sr = sr.numpy() if isinstance(sr, torch.Tensor) else sr
+    def start_super_resolution(self,debug=False):
+        pass
 
-        # Get coor of idx window, create new rasterio Windoow in which it should be saved
-        current_window = info_dict["window_coordinates"][idx]
-        row_off, col_off = current_window.row_off * 4, current_window.col_off * 4
-        sr_file_window = rasterio.windows.Window(col_off,row_off, sr.shape[-2], sr.shape[-1])
-
-        # Get sr shape info
-        num_channels, win_height, win_width = sr.shape
-
-        # change sr data range and dtype to correspond with original
-        sr = sr*10000
-        sr = np.array(sr, dtype=info_dict["dtype"])
-        sr = sr.astype(info_dict["dtype"])
-
-        # save to placehodler .tiff on disk
-        # Open the TIFF file in 'r+' mode (read/write mode)
-        with rasterio.open(info_dict["sr_path"], 'r+') as dst:
-            # Check if the number of bands in the tensor matches the TIFF file
-            if dst.count != sr.shape[0]:
-                raise ValueError("The number of bands in the tensor does not match the TIFF file.")
-            
-            # read data already in the placeholder image
-            placeholder_image = dst.read(window=sr_file_window)
-
-            # perform weighted average between placeholder and SR image
-            sr = weighted_overlap(sr=sr, placeholder=placeholder_image,
-                                  overlap=info_dict["overlap"], 
-                                  pixels_eliminate=info_dict["eliminate_border_px"],
-                                  hr_size=sr.shape[-1])
-
-            # Write each band of the tensor to the corresponding band in the raster
-            for band in range(sr.shape[0]):
-                dst.write(sr[band, :, :], band + 1, window=sr_file_window)
-
-    def super_resolute_bands(self,info_dict,model=None,forward_call="forward",custom_steps=100):
-        
-        """
-        Super-resolutes the entire image of the class using a specified or default super-resolution model.
-
-        Parameters:
-        -----------
-        info_dict : dict
-            A dictionary containing information about the image to super-resolute. This is generated automatically
-            if the class has been initialized and called correctly (via the start_super_resolution).
-
-        model : object, optional
-            A PyTorch model instance that performs super-resolution. If not specified, 
-            a default SR model using bilinear interpolation is used.
-
-        forward_call : str, optional
-            The name of the method to call on the model for performing super-resolution.
-            Defaults to "forward". You can specify any custom method that your model has for
-            super-resolution.
-
-        Usage:
-        ------
-        sr_instance.super_resolute_bands(info_dict, model=my_model, forward_call="custom_forward")
-
-        Notes:
-        ------
-        - The model provided (or the default one) should have a method corresponding to the name 
-          passed in `forward_call` that takes a low-res image and returns a super-resoluted version.
-
-        Returns:
-        --------
-        None : Saves the super-resoluted image in the SR placeholder on the disk via windowed writing.
-
-        """
-        # Get interpolation model if model not specified
-        if model==None:
-            class SRModelPL(LightningModule): # placeholder interpolation model for testing
-                def __init__(self):
-                    super(SRModelPL, self).__init__()
-                def forward(self, x, custom_steps=100):
-                    sr = torch.nn.functional.interpolate(x, size=(512, 512), mode='nearest')
-                    return sr
-                def predict(self,x,custom_steps=100):
-                    return self.forward(x)
-            model = SRModelPL()
-            
-        # allow custom defined forward/SR call on model
-        model_sr_call = getattr(model, forward_call,custom_steps)
-        
-        # iterate over image batches
-        desc_str = "Super-Resoluting"
-        if self.mode=="xAI":
-            desc_str = "Calculating Uncertainty, 15x more time required"
-
-        for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc=desc_str):
-            # get image from S2 image
-            im = self.get_window(idx,info_dict)
-            # batch image
-            im = im.unsqueeze(0)
-            # turn into wanted dtype (double)
-            im = im.float()
-            # send to device
-            im = im.to(model.device)
-            # if ddpm, prepare for dictionary input
-            if forward_call == "perform_custom_inf_step":
-                im = {"LR_image":im,"image":torch.rand(im.shape[0],im.shape[1],512,512)}
-            
-            # super-resolute image
-            if self.mode=="SR":
-                sr = model_sr_call(im,custom_steps=custom_steps)
-                sr = sr.squeeze(0)
-            if self.mode=="xAI":
-                sr = self.calculate_uncertainty(im,model_sr_call,custom_steps=custom_steps)
-
-            # try to move to CPU, might be already on CPU in some cases, therefore try catch block
-            try:
-                sr = sr.detach().cpu()
-            except:
-                pass
-            
-            # save SR into image
-            self.fill_SR_overlap(sr,idx,info_dict)
-
-        # when done, save array into same directory
-        print("Finished. SR image saved at",info_dict["sr_path"])
-
-    def calculate_uncertainty(self,im,model_sr_call,custom_steps=100):
-        device = "cuda:0"
-        print("Device info:",device)
-        
-        if len(im.shape)==3:
-            im = im.unsqueeze(0)
-        im = im.float()
-        im = im.to(device)
-        
-        no_uncertainty = 15 # amount of images to SR
-        seed_list = np.random.randint(0, 1000000, size=no_uncertainty)
-        variations = []
-        for i in range(no_uncertainty):
-            with SuppressPrint():
-                print("Rand Seed",seed_list[i])
-                torch.manual_seed(seed_list[i])
-                pytorch_lightning.seed_everything(seed_list[i])
-            sr = model_sr_call(im)
-            sr = sr.squeeze(0)
-            variations.append(sr.detach().cpu())
-        variations = torch.stack(variations)
-
-        # Get statistics for xAI
-        srs_mean = variations.mean(dim=0)
-        srs_stdev = variations.std(dim=0)
-        lower_bound = srs_mean-srs_stdev
-        upper_bound = srs_mean+srs_stdev
-        interval_size = srs_stdev*2
-        interval_size = interval_size.mean(dim=0).unsqueeze(0)
-        return interval_size
-    
-    def initialize_info_dicts(self,band_selection="10m",overlap=8, eliminate_border_px=0):
-        import os
-        from opensr_utils.utils import can_read_directly_with_rasterio
-        # select info dictionary:
-        # 1 .Get file info from Rasterio
-        # 2. Create window coordinates for selected bands
-        # 3. Create and save placeholder SR file
-
-        # check wether input is in .SAFE format or is traight to file
-        if self.folder_path.replace("/","")[-5:] == ".SAFE":
-            safe_format = True
-            stack_output_path = os.path.join(self.folder_path,"stacked_10m.tif") # if safe format, append file name to folder 
-        elif can_read_directly_with_rasterio(self.folder_path) == True:
-            print("elif:",self.folder_path)
-            safe_format = False
-            folder_path_tmp = os.path.dirname(self.folder_path)
-            file_name_tmp = os.path.basename(self.folder_path)
-            self.folder_path = folder_path_tmp
-            stack_output_path = os.path.join(self.folder_path,file_name_tmp)
-        else:
-            print("else:",self.folder_path)
-            safe_format = False
-            # extract folder path from file path
-            folder_path_tmp = os.path.dirname(self.folder_path)
-            file_name_tmp = os.path.basename(self.folder_path)
-            self.folder_path = folder_path_tmp
-            stack_output_path = os.path.join(self.folder_path,file_name_tmp) # if input is file, keep file name as stacked
-            # make sure the file that has been inputted is valid
-            assert can_read_directly_with_rasterio(stack_output_path) == True, "Input is a file. File type can not be opened by 'rasterio'"
-
-        if band_selection=="10m":
-            # If Safe format, perform band extraction ect
-            if safe_format:
-                # work with file lock in order to not do this multiple times during Multi-GPU inference
-                # Attempt to acquire an exclusive lock on a temporary lock file
-                import os
-                import fcntl
-                lock_file_path = stack_output_path + ".lock"
-                with open(lock_file_path, 'w') as lock_file:
-                    try:
-                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        # This block now runs only in the process that acquired the lock
-                        if os.path.exists(stack_output_path): # remove file if it exists
-                            pass
-                            #os.remove(stack_output_path)
-                            #print("Overwriting existing 10 bands file...")
-                        else: # create file
-                            # FILE CREATION LOGIC -----------------------------------------------------------------------
-                            print("Creating stacked 10m bands file ...")
-                            extract_10mbands_from_S2_folder(self.folder_path)
-                            # END FILE CREATION LOGIC -------------------------------------------------------------------
-                        fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
-                    except IOError:
-                        # Another process has the lock; skip file creation
-                        pass
-                self.b10m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
-            if safe_format==False:
-                print(stack_output_path)
-                self.b10m_file_path = stack_output_path
-
-            # Get File information - 10m bands
-            self.b10m_info = {}
-            self.b10m_info["lr_path"] = self.b10m_file_path
-            self.b10m_info["bands"] = [0,1,2,3]
-            self.b10m_info["eliminate_border_px"] = eliminate_border_px
-            self.b10m_info["overlap"] = overlap
-            with rasterio.open(self.b10m_file_path) as src:
-                self.b10m_info["img_width"], self.b10m_info["img_height"],self.b10m_info["dtype"] = src.width, src.height,src.dtypes[0]
-                # Extract the affine transformation matrix
-                self.b10m_info["geo_transform"] = src.transform
-                # Extract the CRS
-                self.b10m_info["crs"] = src.crs
-            
-            # call local functions: get windxw coordinates and create placeholder SR file
-            self.b10m_info["window_coordinates"] = self.create_window_coordinates_overlap(self.b10m_info)
-            out_name = str(self.mode+"_10mbands.tif")
-            if self.mode!="Metrics":
-                self.b10m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b10m_info,out_name=out_name)
-            info_dict = self.b10m_info
-            return(info_dict)
-        
-        # for 20m case
-        if band_selection=="20m":
-            if safe_format:
-                # work with file lock in order to not do this multiple times during Multi-GPU inference
-                # Attempt to acquire an exclusive lock on a temporary lock file
-                import os
-                import fcntl
-                stack_output_path = os.path.join(self.folder_path,"stacked_20m.tif")
-                lock_file_path = stack_output_path + ".lock"
-                with open(lock_file_path, 'w') as lock_file:
-                    try:
-                        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        # This block now runs only in the process that acquired the lock
-                        if os.path.exists(stack_output_path): # remove file if it exists
-                            pass
-                            #os.remove(stack_output_path)
-                            #print("Overwriting existing 20m bands  file...")
-                        else:
-                            # FILE CREATION LOGIC -----------------------------------------------------------------------
-                            print("Creating stacked 20m bands file ...")
-                            extract_20mbands_from_S2_folder(self.folder_path)
-                            # END FILE CREATION LOGIC -------------------------------------------------------------------
-                        fcntl.flock(lock_file, fcntl.LOCK_UN) # release lock
-                    except IOError:
-                        # Another process has the lock; skip file creation
-                        pass
-                self.b20m_file_path = os.path.join(self.folder_path,"stacked_10m.tif")
-            if safe_format==False:
-                self.b20m_file_path = os.path.join(self.folder_path)
-
-            # Get File information - 20m bands 
-            self.b20m_file_path = os.path.join(self.folder_path,"stacked_20m.tif")
-            self.b20m_info = {}
-            self.b20m_info["lr_path"] = self.b20m_file_path
-            self.b20m_info["bands"] = [0,1,2,3,4,5]
-            self.b20m_info["eliminate_border_px"] = eliminate_border_px
-            self.b20m_info["overlap"] = overlap
-            with rasterio.open(self.b20m_file_path) as src:
-                self.b20m_info["img_width"], self.b20m_info["img_height"],self.b20m_info["dtype"] = src.width, src.height, src.dtypes[0]
-                # Extract the affine transformation matrix
-                self.b20m_info["geo_transform"] = src.transform
-                # Extract the CRS
-                self.b20m_info["crs"] = src.crs
-
-            # call local functions: get windxw coordinates and create placeholder SR file
-            self.b20m_info["window_coordinates"] = self.create_window_coordinates_overlap(self.b20m_info)
-            out_name = str(self.mode+"_20mbands.tif")
-            if self.mode!="Metrics":
-                self.b20m_info["sr_path"] = self.create_and_save_placeholder_SR_files(self.b20m_info,out_name=out_name)
-            info_dict = self.b20m_info
-            return(info_dict)
-    
-    def start_super_resolution(self,band_selection="10m",model=None, forward_call="forward", custom_steps=100, overlap=8, eliminate_border_px=0):
-        print("Reminder: working in ",self.mode,"mode!")
-        # TODO: then, profit from these settings from the PL dataset class
-        # assert band selection in available implemented methods
-        assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"    
-
-        # if self.info_dict doesnt exist
-        if hasattr(self, 'info_dict'):
-            pass
-        else:
-            info_dict = self.initialize_info_dicts(band_selection=band_selection,overlap=overlap, eliminate_border_px=eliminate_border_px)  
-            self.info_dict = info_dict
-
-        
-        # if we're in metrics mode, go straight to metrics calculation
-        if self.mode=="Metrics":
-            metrics = self.start_metric_calculation(band_selection=band_selection,model=model, forward_call=forward_call, custom_steps=custom_steps)
-            self.metrics = metrics
-            print("Metrics calculated. Saved in self.metrics.")
-            return(None)
-
-        # If model is a torch.nn.Module and SR wanted, do 1-batch SR with patching on the fly
-        if isinstance(model, LightningModule) and self.mode!="xAI":
-            print("Lightning Model detected, performing multi-batched inference with PyTorch Lightning.")
-            from opensr_utils.pl_utils import predict_pl_workflow
-            args = {
-                "band_selection": band_selection,
-                "overlap": overlap,
-                "eliminate_border_px": eliminate_border_px,
-                "num_workers": 64,
-                "batch_size": 24,
-                "prefetch_factor": 4,
-                "accelerator": "gpu",
-                "devices": -1,
-                "strategy": "ddp",
-                "custom_steps": custom_steps,
-                "mode": self.mode,
-                "window_size": self.window_size}
-            predict_pl_workflow(input_file=self.folder_path,model=model,**args)
-
-        # if is torch model, perform standard slower SR and warn user
-        elif isinstance(model, torch.nn.Module) and self.mode=="SR":
-            print("Model is torch.NN.Module, performing 1-batched inference with patching on the fly. For faster inference, provide a PyTorch Lightning module.")
-            self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
-        
-        # if model is lightning and we want to perform xAI, extract torch model and perform xAI
-        elif isinstance(model, LightningModule) and self.mode=="xAI":
-            model = model.model
-            assert isinstance(model, torch.nn.Module), "torch model extraction form PyTorch Lighnting failed"
-            print("Extracted torch.model from PyTorch Lightning, performing 1 GPU xAI...")
-            self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
-
-        elif model==None: # test case
-            print("No model passed. Performing interpolation instead of SR for testing purposes.")
-            self.super_resolute_bands(info_dict,model, forward_call=forward_call, custom_steps=custom_steps)
-        else:
-            raise NotImplementedError("Model type not recognized. Please provide a PyTorch Lightning model, PyTorch Model, or for testing purposes 'None'.")
-       
-        # CLEANUP
-        self.delete_lock_files() # delete lock files created for multiprocessing
-
-        # if wanted, delete LR stack
-        if not self.keep_lr_stack:
-            self.delete_LR_stack(info_dict)
-
-    def start_metric_calculation(self,band_selection="10m",model=None, forward_call="forward", custom_steps=200):
-        raise NotImplementedError("Metrics calculation currently unavailable.")
-    
-        from opensr_utils.validation_opensr_test import append_dicts
-        from opensr_utils.validation_opensr_test import compute_metrics
-        # TODO: then, profit from these settings from the PL dataset class
-        # assert band selection in available implemented methods
-        assert band_selection in ["10m","20m"], "band_selection not in ['10m','20m']"    
-        info_dict = self.initialize_info_dicts(band_selection=band_selection,overlap=2, eliminate_border_px=0)    
-        model_sr_call = getattr(model, forward_call,custom_steps)
-
-        # If model is a torch.nn.Module, do 1-batch SR with patching on the fly
-        if isinstance(model, LightningModule):
-            # iterate over image batches
-            metrics_dict = {} # save metric dictionary
-            amount = 500
-            random.shuffle(info_dict["window_coordinates"]) # randomls shuffle to get 500 random patches
-            for idx in tqdm(range(len(info_dict["window_coordinates"])),ascii=False,desc="Calculating Metrics",total=amount):
-                # only do x amount
-                if idx>=amount:
-                    break
-                # random number int to get random window
-                #idx = np.random.randint(0,len(info_dict["window_coordinates"]))
-                # get image from S2 image
-                im = self.get_window(idx,info_dict)
-                # batch image
-                im = im.unsqueeze(0)
-                # turn into wanted dtype (double)
-                im = im.float()
-                # send to device
-                im = im.cuda()
-                # super-resolute image
-                sr = model_sr_call(im)
-                # send to calculation
-                m = compute_metrics(im,sr)
-                #m["window"] = info_dict["window_coordinates"][idx]
-                metrics_dict = append_dicts(metrics_dict,m)
-            return(metrics_dict)
-
-        else:
-            print("Model is torch.NN.Module. Metrics calculation currently only supported for PyTorch Lightning models.")
-            return(None)
         
         
 if __name__ == "__main__":
@@ -700,51 +276,14 @@ if __name__ == "__main__":
                  root=path,
                  model=None,
                  window_size=(128, 128),
-                 factor=4)
+                 factor=4,
+                 overlap=8,
+                 eliminate_border_px=0)
+    o.start_super_resolution()
     
-    # test dataset class
-    ds = o.datamodule.dataset
-    img = ds.__getitem__(-1)
-    print(img.mean(),img.shape)
-    # test dataset dataloader
-    dl = o.datamodule.predict_dataloader()
-    for batch in dl:
-        print(batch.mean(), batch.shape)
-        break
-
-"""
-from torch.utils.data import Dataset, DataLoader
-class windowed_SR_and_saving_dataset(Dataset):
-   
-    def __init__(self, folder_path, **kwargs):
-        band_selection = kwargs.get('band_selection', "10m")
-        overlap = kwargs.get('overlap', 40)
-        eliminate_border_px = kwargs.get('eliminate_border_px', 0)
-        num_workers = kwargs.get('num_workers', 64)
-        batch_size = kwargs.get('batch_size', 24)
-        prefetch_factor = kwargs.get('prefetch_factor', 4)
-        accelerator = kwargs.get('accelerator', "gpu")
-        devices = kwargs.get('devices', -1)
-        strategy = kwargs.get('strategy', "ddp")
-        custom_steps = kwargs.get('custom_steps', 100)
-        mode =  kwargs.get('mode', "SR")
-        window_size = kwargs.get('window_size', (128,128))
-
-        # create object
-        self.sr_obj = windowed_SR_and_saving(folder_path, window_size=window_size,
-                                             factor=4, keep_lr_stack=True,
-                                             mode=mode)
-        # initialze information
-        self.info_dict = self.sr_obj.initialize_info_dicts(band_selection=band_selection,overlap=overlap,eliminate_border_px=eliminate_border_px) 
-
-    def __len__(self):
-        return(len(self.info_dict["window_coordinates"]))
     
-    def __getitem__(self,idx):
-        im = self.sr_obj.get_window(idx,self.info_dict)
-        im = im.float()
-        return(im)
-
-
-
-"""
+    test_data = False
+    if test_data:
+        ds = o.datamodule.dataset
+        img = ds.__getitem__(-1)
+        print(img.mean(),img.shape)
