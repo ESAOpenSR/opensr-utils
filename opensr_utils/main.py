@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+
+
 # torch stuff
 import torch
 from pytorch_lightning import LightningModule,Trainer
@@ -37,6 +40,7 @@ class large_file_processing():
                  eliminate_border_px=0,
                  device:str="cpu",
                  gpus: int = 1 or list,
+                 debug=False,
                  ):
 
         """
@@ -170,6 +174,7 @@ class large_file_processing():
         assert factor in [2,4,6,8], "Factor must be one of [2,4,6,8]."
 
         # General Settings
+        self.debug = debug # if True, only process 100 windows globally (DDP-safe)
         self.root = root # path to folder containing S2 SAFE data format
         self.window_size = window_size # window size of the LR image
         self.factor = factor # sr factor of the model
@@ -207,9 +212,19 @@ class large_file_processing():
                                       windows=self.image_meta["image_windows"],
                                       factor=self.factor)
 
+        # Print Status
         print("\n")
-        print("Status: Model and Data ready for inference.")
-        print("Run SR with .start_super_resolution() method.")
+        print("📊 Status: Model and Data ready for inference ✅")
+        print("🚀 Run SR with .start_super_resolution() method 🖼️!")
+        
+        # If in standard mode, run everything right away
+        if self.debug!=True:
+            self.start_super_resolution(debug=self.debug)            
+            self.write_to_file()
+            print("SR Processing complete! 🎉🚀")
+        else: # debugging options
+            print("Debugging active. Run SR and stitching individually.")
+
 
     def create_datamodule(self):
         """
@@ -220,7 +235,8 @@ class large_file_processing():
         """
         dm = PredictionDataModule(input_type=self.input_type,
                               root=self.root,
-                              windows = self.image_meta["image_windows"])
+                              windows = self.image_meta["image_windows"],
+                              prefetch_factor=2, batch_size=16, num_workers=4)
         dm.setup()
         self.datamodule = dm
 
@@ -244,26 +260,31 @@ class large_file_processing():
         elif os.path.isdir(root):
             input_type = "folder"
         else:
-            raise NotImplementedError("Input path is neither a file nor a folder. Please provide a valid input path.")
+            raise NotImplementedError(
+                "🚫 Input path is neither a 📄 file nor a 📁 folder. 👉 Please provide a valid input path."
+            )
+        
         # Verifying type of input: file, SAFE or S2GM folder
         if input_type=="file":
+            self.input_type = "file"
             self.placeholder_path = os.path.dirname(self.root)
             self.image_meta["placeholder_path"] = self.placeholder_path
             if can_read_directly_with_rasterio(self.root) == False:
-                raise NotImplementedError("Input is a file. File type can not be opened by 'rasterio'.")
+                raise NotImplementedError(
+                    "🚫 Input is a file, but this file type cannot be opened by 'rasterio' ❌📂"
+                )
             else:
-                print("Input is a file, can be opened with rasterio, processing possible.")
+                print("📄 Input is a file, can be opened with rasterio — processing possible! 🚀")
         elif input_type=="folder":
             self.placeholder_path = self.root
             if self.root.replace("/","")[-5:] == ".SAFE":
-                print("Input is Sentinel-2 .SAFE folder, processing possible.")
+                print("📁 Input is Sentinel-2 .SAFE folder, processing possible! 🚀")
                 self.input_type = "SAFE"
             elif "S2GM" in self.root:
-                print("Input is Sentinel-2 S2GM folder, processing possible.")
+                print("📁 Input is Sentinel-2 S2GM folder, processing possible! 🚀")
                 self.input_type = "S2GM"
             else:
-                raise NotImplementedError("Input folder is not in .SAFE format or S2GM format. Please provide a valid input folder.")
-        self.input_type = input_type
+                raise NotImplementedError("🚫 Input folder is not in .SAFE format or S2GM format. 👉 Please provide a valid input folder.")
         
     def get_image_meta(self, root_dir):
         """
@@ -341,16 +362,16 @@ class large_file_processing():
         temp_folder_path = os.path.join(os.path.dirname(output_file_path),"temp")
         os.makedirs(temp_folder_path, exist_ok=True)
         self.temp_folder = temp_folder_path
-        print("Created temporary folder at:",temp_folder_path)
+        print("⚠️ Placeholder already exists: ",temp_folder_path)
         
         # 3. Create placeholder file if it does not exist yet, otherwise skip
         if os.path.exists(output_file_path):
-            print(f"Placeholder already exists: {output_file_path}")
+            print(f"📂 Created temporary folder at: {output_file_path}")
             self.placeholder_path = output_file_path
         
         # 4. If it does not exist, create it
         else:
-            print(f"Creating placeholder: {output_file_path}")
+            print(f"📂 Created temporary folder at: {output_file_path}")
             nb = int(self.image_meta["bands"])
             W  = int(self.image_meta["width"]  * self.factor)
             H  = int(self.image_meta["height"] * self.factor)
@@ -377,7 +398,9 @@ class large_file_processing():
             # Create the dataset and close without writing any pixels
             with rasterio.open(output_file_path, "w", **profile):
                 pass
+
             """
+            # actually writing zeros is not needed, just create empty file
             with rasterio.open(output_file_path, "w", **profile) as dst:
                 block_h, block_w = dst.block_shapes[0]      # (rows, cols)
                 zeros_block = np.zeros((nb, block_h, block_w), dtype=dst.dtypes[0])
@@ -390,7 +413,7 @@ class large_file_processing():
                         dst.write(zeros_block[:, :h, :w], window=window)
             """
 
-            print(f"Saved empty placeholder SR image at: {output_file_path}")
+            print(f"💾 Saved empty placeholder SR image at: {output_file_path}")
         
     def create_image_windows(self): # Works
         """
@@ -470,7 +493,7 @@ class large_file_processing():
         Cleans up after prediction and stitching.
         """
         shutil.rmtree(self.temp_folder)
-        print("Deleted temp folder at",self.temp_folder)
+        print("🗑️📂 Deleted temporary folder at:",self.temp_folder)
 
     def start_super_resolution(self, debug: bool = False):
         """
@@ -495,10 +518,6 @@ class large_file_processing():
         windows_all = self.image_meta["image_windows"]
         windows_run = windows_all[:100] if debug else windows_all
 
-        # Rebuild a datamodule for this run (debug-safe) and update model hook context
-        dm = PredictionDataModule(input_type=self.input_type, root=self.root, windows=windows_run)
-        dm.setup()
-
         # Hand the hook context to the model (these are consumed inside predict_step)
         self.model._save_temp_folder = self.temp_folder
         self.model._save_windows     = windows_run
@@ -516,13 +535,29 @@ class large_file_processing():
         )
 
         # Stream predictions to disk inside predict_step (we return None there to avoid gathers)
-        trainer.predict(self.model, datamodule=dm, return_predictions=False)
+        try:
+            trainer.predict(self.model, datamodule=self.datamodule, return_predictions=False)    
+        except RuntimeError as e:
+            msg = str(e)
+            if "Lightning can't create new processes if CUDA is already initialized" in msg:
+                # Stop the workflow cleanly (no noisy traceback for users)
+                print(
+                    "🚨🔥 STOPPING WORKFLOW 🔥🚨\n"
+                    "⚠️  CUDA was already initialized before launching DDP!\n"
+                    "🖥️  This is a multi-GPU processing limitation of PyTorch Lightning.\n"
+                    "🤔  This can happen if you pass 'None' as model with gpus>1.\n"
+                    "🔄  Please restart the Python kernel or switch to single-GPU (devices=1).\n"
+                    "✅  After restarting, re-run your workflow."
+                )
+                raise SystemExit(3)
+            raise  # unrelated error: re-raise
+
 
         # Rank-aware status message
         is_ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
         rank = torch.distributed.get_rank() if is_ddp else 0
         if rank == 0:
-            print(f"Prediction complete. Tiles saved in: {self.temp_folder}")
+            print(f"✅✨ Prediction complete! ✨✅. SR patches saved in 📂: {self.temp_folder}")
             if debug:
                 print("Debug mode was ON → processed only 100 windows.")
 
@@ -615,27 +650,79 @@ class large_file_processing():
         # rename placeholder file to sr.tif
         sr_path = os.path.join(self.placeholder_filepath.replace("sr_placeholder.tif","sr.tif"))
         os.rename(self.placeholder_filepath, sr_path)
-        print(f"Stitched {len(entries)} tiles into: {sr_path}")
+        print(f"🧩🖼️  Stitched {len(entries)} tiles into: {sr_path}")
 
-if __name__ == "__main__":
-    path = "/data2/simon/mosaic/individual_tile/S2_BA_smaller.tif"
-    o = large_file_processing( 
-                 root=path,
-                 model=None,
-                 window_size=(128, 128),
-                 factor=4,
-                 overlap=12,
-                 eliminate_border_px=2,
-                 device="cuda",
-                 gpus=[0]
-                 )
-    o.start_super_resolution(debug=False)
-    o.write_to_file()
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="🚀 Patch-based super-resolution for large geospatial rasters"
+    )
+    parser.add_argument("root", type=str, help="📂 Path to input file/folder")
     
+    parser.add_argument("model", type=str, choices=["LDSRS2", "None"],
+                        help="🤖 Model to run: 'LDSRS2' or 'None'")
+    
+    parser.add_argument("--window_size", type=int, nargs=2, default=(128, 128),
+                        help="🔲 LR window size (default: 128 128)")
+    parser.add_argument("--factor", type=int, default=4, choices=[2, 4, 6, 8],
+                        help="⬆️ Upscaling factor (default: 4)")
+    parser.add_argument("--overlap", type=int, default=8,
+                        help="🤝 Overlap in LR pixels (default: 8)")
+    parser.add_argument("--eliminate_border_px", type=int, default=0,
+                        help="✂️ Pixels to eliminate at patch borders (default: 0)")
+    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
+                        help="⚡ Device for inference (default: cpu)")
+    parser.add_argument("--gpus", type=int, nargs="+", default=[0],
+                        help="💻 GPU IDs to use (default: 0)")
+    parser.add_argument("--debug", action="store_true",
+                        help="🐞 Debug mode: process only ~100 windows")
+
+    args = parser.parse_args()
+    
+
+    # Resolve model argument
+    if args.model == "LDSRS2":
+        print("Using LDSR-S2 model.")
+        from io import StringIO
+        from omegaconf import OmegaConf
+        import requests, opensr_model
+        config_url = "https://raw.githubusercontent.com/ESAOpenSR/opensr-model/a5474a07258d632e09236a58db34fa8640678c22/opensr_model/configs/config_10m.yaml"
+        response = requests.get(config_url)
+        config = OmegaConf.load(StringIO(response.text))
+        model = opensr_model.SRLatentDiffusion(config, device=args.device) # create model
+        model.load_pretrained(config.ckpt_version)
+    elif args.model == "None":
+        print("Using placeholder (interpolation) mode.")
+        model = None
+    else:
+        print("⚠️ From CLI, you can only run the LDSR-S2 model. Using placeholder (interpolation) mode.")
+        model = None
+
+    # Create processing object
+    processor = large_file_processing(
+        root=args.root,
+        window_size=tuple(args.window_size),
+        factor=args.factor,
+        overlap=args.overlap,
+        eliminate_border_px=args.eliminate_border_px,
+        device=args.device,
+        gpus=args.gpus,
+        debug=args.debug,
+    )
+    
+if __name__ == "__main__":
+    main()
+    
+    
+    
+    # Other stuff
     """
     # open file and look at all gdal settings
     import rasterio
-    with rasterio.open("/data2/simon/mosaic/individual_tile/sr.tif") as src:
+    with rasterio.open("/data2/simon/mosaic/Q10_20240701_20240930_Global-S2GM-m36p8_STD_v2.0.5/S2GM_Q10_20240701_20240930_Global-S2GM-m36p8_STD_v2.0.5/tile_0/sr.tif") as src:
         print(src.profile)
         print(src.tags())
         print(src.tags(ns="IMAGE_STRUCTURE"))
@@ -645,6 +732,18 @@ if __name__ == "__main__":
         print(src.compression.name) 
         print(src.compression.value)
         
+    import rasterio
+    with rasterio.open("/data2/simon/mosaic/individual_tile/sr_placeholder.tif") as src:
+        print(src.profile)
+        print(src.tags())
+        print(src.tags(ns="IMAGE_STRUCTURE"))
+        print(src.tags(ns="TIFF"))
+        print(src.tags(ns="ZSTD"))
+        print(src.compression)
+        print(src.compression.name) 
+        print(src.compression.value)
+        
+    import rasterio
     with rasterio.open("/data2/simon/mosaic/individual_tile/S2_BA_smaller.tif") as src:
         print(src.profile)
         print(src.tags())

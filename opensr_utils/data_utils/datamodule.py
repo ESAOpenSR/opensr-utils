@@ -236,7 +236,7 @@ class PredictionDataModule(LightningDataModule):
         self.dataset = PredictionDataset(input_type=self.input_type,
                                      root=self.root,
                                      windows=self.windows)
-        print(f"Setting up PredictionDataModule with {len(self.dataset)} patches.")
+        print(f"📦 Created PredictionDataModule with {len(self.dataset)} patches.")
 
     def predict_dataloader(self):
         return DataLoader(self.dataset, num_workers=self.num_workers,

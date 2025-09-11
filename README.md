@@ -3,9 +3,11 @@
 #### 🚀 Fast multi-GPU super-resolution for massive Sentinel-2 imagery 🌍 — seamless weighted blending ✨ removes patch artifacts, while flexible input support (.SAFE 📂, S2GM 🛰️, GeoTIFF 🗺️) makes generating high-quality SR products effortless.
 
 *WARNING*   
-This Repo is currently undergoing major revision!  
-More documentation coming soon!  
-More features coming soon!
+- This Repo is currently udnergoing major revision
+- It is functional for RGB+NIR images currently.
+- Functionalities coming in the future:
+	- Pass more file types
+	- Run SR for a selectable amount of bands
     
 ![img1](resources/utils_poster.png)
 

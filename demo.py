@@ -20,7 +20,7 @@ device = "cuda"  # or "cpu" - Dont use the automated detection, it messes up the
 config_url = "https://raw.githubusercontent.com/ESAOpenSR/opensr-model/refs/tags/v0.3.1/opensr_model/configs/config_10m.yaml"
 response = requests.get(config_url)
 config = OmegaConf.load(StringIO(response.text))
-model = opensr_model.SRLatentDiffusion(config, device=device)
+model = opensr_model.SRLatentDiffusion(config, device=device) # create model
 model.load_pretrained(config.ckpt_version)
 
 # --- 2) Run large-scale Inference ------------------------------------

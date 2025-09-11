@@ -3,6 +3,7 @@
 trash/
 trash2/
 images_other/
+inference.py
 
 
 # images
@@ -22,7 +23,6 @@ validation_calc_opensr.py
 ablation_copy.py
 linear_transform.py
 uncertainty.py
-
 
 # other
 __pycache__/*

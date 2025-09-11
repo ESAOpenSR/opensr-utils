@@ -300,7 +300,7 @@ def preprocess_model(model,temp_folder,windows,factor):
             json.dump(shard, f, separators=(",", ":"))  # compact
             f.flush()
             os.fsync(f.fileno())
-        print(f"[rank {self._rank}] wrote {len(self._entries)} entries → {shard_path}")
+        #print(f"[rank {self._rank}] wrote {len(self._entries)} entries → {shard_path}")
 
         # ---- DDP sync ----
         ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -349,7 +349,7 @@ def preprocess_model(model,temp_folder,windows,factor):
                 json.dump(merged, f, separators=(",", ":"))
                 f.flush()
                 os.fsync(f.fileno())
-            print(f"[rank 0] merged {len(uniq)} entries → {merged_path}")
+            #print(f"[rank 0] merged {len(uniq)} entries → {merged_path}")
         
         # CleanUp
         try:
@@ -395,10 +395,10 @@ def preprocess_model(model,temp_folder,windows,factor):
 
     # --- wrap model if needed ---
     if isinstance(model, LightningModule):
-        print("Model is a LightningModule.")
+        print("⚡ Model is a LightningModule ✅")
         model.eval()
     elif isinstance(model, torch.nn.Module):
-        print("Model is a torch.nn.Module. Wrapping in LightningModule.")
+        print("Model is a torch.nn.Module. Wrapping in LightningModule ✅.")
         class WrappedModel(LightningModule):
             def __init__(self, mdl):
                 super().__init__()
@@ -409,7 +409,7 @@ def preprocess_model(model,temp_folder,windows,factor):
         wrapped_model.eval()
         model = wrapped_model
     elif model is None:
-        print("No model provided. Using placeholder interpolation model.")
+        print("⚠️ No model provided - using placeholder interpolation model.")
         placeholder_model = SRModelPL()
         placeholder_model.eval()
         model = placeholder_model
