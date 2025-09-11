@@ -39,7 +39,3 @@ sr_object = opensr_utils.large_file_processing(
     device=device,             # "cuda" for GPU-accelerated inference
     gpus=0,                    # pass GPU ID or list of GPUs
 )
-
-# Start the SR pipeline
-sr_object.start_super_resolution()
-print("✅ Super-resolution finished!")

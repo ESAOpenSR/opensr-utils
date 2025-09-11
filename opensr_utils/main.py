@@ -557,7 +557,7 @@ class large_file_processing():
         is_ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
         rank = torch.distributed.get_rank() if is_ddp else 0
         if rank == 0:
-            print(f"✅✨ Prediction complete! ✨✅. SR patches saved in 📂: {self.temp_folder}")
+            print(f"✅ Prediction complete! SR patches saved in 📂: {self.temp_folder}")
             if debug:
                 print("Debug mode was ON → processed only 100 windows.")
 
@@ -650,7 +650,7 @@ class large_file_processing():
         # rename placeholder file to sr.tif
         sr_path = os.path.join(self.placeholder_filepath.replace("sr_placeholder.tif","sr.tif"))
         os.rename(self.placeholder_filepath, sr_path)
-        print(f"🧩🖼️  Stitched {len(entries)} tiles into: {sr_path}")
+        print(f"🧩 Stitched {len(entries)} tiles into: {sr_path}")
 
 
 
