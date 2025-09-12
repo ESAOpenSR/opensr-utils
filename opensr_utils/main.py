@@ -20,6 +20,7 @@ import shutil
 import rasterio
 from rasterio.transform import Affine
 from rasterio.windows import Window
+from rasterio.shutil import copy as rio_copy
 
 
 # local imports
@@ -185,6 +186,8 @@ class large_file_processing():
             self.gpus = [gpus] # number of gpus or list of gpu ids to use
         else:
             self.gpus = gpus
+        if self.device == "cpu":
+            self.gpus = None
             
         # ---
         # Local variable definitions
@@ -215,15 +218,25 @@ class large_file_processing():
         # Print Status
         print("\n")
         print("📊 Status: Model and Data ready for inference ✅")
-        print("🚀 Run SR with .start_super_resolution() method 🖼️!")
         
         # If in standard mode, run everything right away
         if self.debug!=True:
-            self.start_super_resolution(debug=self.debug)            
-            self.write_to_file()
-            print("SR Processing complete! 🎉🚀")
+            print("🚀 Runing SR...")
+            self.start_super_resolution(debug=self.debug)    
+            
+            # from now on, if in GPU and GPUs >1, only run on rank 0
+            is_ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
+            rank = torch.distributed.get_rank() if is_ddp else 0
+            if is_ddp: # create barrier, move on only if all GPUs are finished
+                torch.distributed.barrier()
+            if rank == 0: # only rank 0 writes to file
+                self.write_to_file()    
+                self.delete_LR_temp()
+            if is_ddp: # barrier again to wait until rank 0 is finished writing
+                torch.distributed.barrier()
+
         else: # debugging options
-            print("Debugging active. Run SR and stitching individually.")
+            print("Debugging active. Run SR and stitching individually. Note: if multi-GPU env, run only on rank 0.")
 
 
     def create_datamodule(self):
@@ -337,7 +350,7 @@ class large_file_processing():
         # finally, add image windows to metadata
         self.image_meta["image_windows"] = self.create_image_windows()
         
-    def create_placeholder_file(self):
+    def create_placeholder_file(self,force=False):
         """
         Create an empty HR GeoTIFF placeholder for stitched SR results.
 
@@ -356,29 +369,31 @@ class large_file_processing():
         self.image_meta["placeholder_dir"] = self.placeholder_dir
         self.placeholder_filepath = output_file_path
         self.placeholder_dir = self.placeholder_dir
-
         
         # 2. Creating temporary folder for storing batches during prediction
         temp_folder_path = os.path.join(os.path.dirname(output_file_path),"temp")
-        os.makedirs(temp_folder_path, exist_ok=True)
         self.temp_folder = temp_folder_path
-        print("⚠️ Placeholder already exists: ",temp_folder_path)
         
         # 3. Create placeholder file if it does not exist yet, otherwise skip
         if os.path.exists(output_file_path):
-            print(f"📂 Created temporary folder at: {output_file_path}")
-            self.placeholder_path = output_file_path
+            print("⚠️ Placeholder already exists: ",temp_folder_path)
         
         # 4. If it does not exist, create it
         else:
+            os.makedirs(temp_folder_path, exist_ok=True)
             print(f"📂 Created temporary folder at: {output_file_path}")
+            
+        # If sr_placeholder file exists and force is False, skip creation
+        if os.path.exists(self.placeholder_filepath) and force==False:
+            print(f"⚠️ Placeholder file already exists — skipping creation.")
+        else:  
             nb = int(self.image_meta["bands"])
             W  = int(self.image_meta["width"]  * self.factor)
             H  = int(self.image_meta["height"] * self.factor)
             tr = self.image_meta["transform"]
             save_transform = Affine(tr.a / self.factor, tr.b, tr.c, tr.d, tr.e / self.factor, tr.f)
 
-            profile = { # define profile for output file
+            profile = {  # robust placeholder for stitching (no compression!)
                 "driver": "GTiff",
                 "dtype": self.image_meta["dtype"],
                 "count": nb,
@@ -386,34 +401,27 @@ class large_file_processing():
                 "height": H,
                 "crs": self.image_meta["crs"],
                 "transform": save_transform,
-                "compress": "zstd", # deflate for older versions
-                "zlevel":9,
+
+                # 🔒 Important: keep uncompressed while many writes happen
+                "compress": "none",        # <-- no ZSTD/DEFLATE during stitching
+                # remove "zlevel" and "predictor" when uncompressed
+
                 "tiled": True,
                 "blockxsize": 512,
                 "blockysize": 512,
-                "bigtiff": "IF_SAFER",
-                "predictor": 2, # turn this off for older versions
-                "sparse_ok": True,  # rasterio passes SPARSE_OK when present in profile >=1.3
+
+                # Huge rasters: don't risk "IF_SAFER" surprises—just use BIGTIFF
+                "bigtiff": "YES",
+
+                # Safe to keep; helps GDAL skip empty tiles
+                "sparse_ok": True,
             }
             # Create the dataset and close without writing any pixels
             with rasterio.open(output_file_path, "w", **profile):
                 pass
-
-            """
-            # actually writing zeros is not needed, just create empty file
-            with rasterio.open(output_file_path, "w", **profile) as dst:
-                block_h, block_w = dst.block_shapes[0]      # (rows, cols)
-                zeros_block = np.zeros((nb, block_h, block_w), dtype=dst.dtypes[0])
-
-                for row in tqdm(range(0, H, block_h),desc="Writing placeholder file ..."):
-                    h = min(block_h, H - row)
-                    for col in range(0, W, block_w):
-                        w = min(block_w, W - col)
-                        window = rasterio.windows.Window(col_off=col, row_off=row, width=w, height=h)
-                        dst.write(zeros_block[:, :h, :w], window=window)
-            """
-
             print(f"💾 Saved empty placeholder SR image at: {output_file_path}")
+
+
         
     def create_image_windows(self): # Works
         """
@@ -523,10 +531,11 @@ class large_file_processing():
         self.model._save_windows     = windows_run
         self.model._save_factor      = int(self.factor)
 
+        devices = self.gpus if self.gpus is not None else 1
         # Trainer config: no logging/checkpointing; DDP handled automatically if multiple GPUs
         trainer = Trainer(
             accelerator=self.device,
-            devices=self.gpus,
+            devices=devices,
             logger=False,
             enable_checkpointing=False,
             enable_model_summary=False,
@@ -615,22 +624,26 @@ class large_file_processing():
 
         to_delete = []  # paths staged for deletion
         cleanup_every = 50  # delete staged files every N tiles (0 = never)
+        missing_count = 0 # count of missing patches
         for i, e in enumerate(tqdm(entries, desc="Stitching → placeholder", unit="tile"), start=1):
                 p = e["path"]
+                try:
+                    # load patch
+                    if container == "npz" and p.endswith(".npz"):
+                        with np.load(p) as z:
+                            sr = z[key]  # (C,H,W), uint16 ×10000
+                    else:
+                        sr = np.load(p)
 
-                # load patch
-                if container == "npz" and p.endswith(".npz"):
-                    with np.load(p) as z:
-                        sr = z[key]  # (C,H,W), uint16 ×10000
-                else:
-                    sr = np.load(p)
+                    # blend-write into placeholder
+                    blend_write(self, sr, i-1, info_dict)
 
-                # blend-write into placeholder
-                blend_write(self, sr, i-1, info_dict)
+                    # stage for deletion
+                    to_delete.append(p)
 
-                # stage for deletion
-                to_delete.append(p)
-
+                except FileNotFoundError:
+                    missing_count += 1
+                
                 # every cleanup_every tiles, delete staged files
                 if cleanup_every and (i % cleanup_every == 0):
                     for fp in to_delete:
@@ -646,12 +659,14 @@ class large_file_processing():
                                 pass
                     to_delete.clear()
 
-        self.delete_LR_temp()
         # rename placeholder file to sr.tif
         sr_path = os.path.join(self.placeholder_filepath.replace("sr_placeholder.tif","sr.tif"))
         os.rename(self.placeholder_filepath, sr_path)
         print(f"🧩 Stitched {len(entries)} tiles into: {sr_path}")
+        if missing_count > 0:
+            print(f"⚠️ {missing_count} patch files were missing and could not be stitched.")
 
+    
 
 
 def main():
