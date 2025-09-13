@@ -224,21 +224,31 @@ class large_file_processing():
             print("🚀 Runing SR...")
             self.start_super_resolution(debug=self.debug)    
             
-            # from now on, if in GPU and GPUs >1, only run on rank 0
-            is_ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
-            rank = torch.distributed.get_rank() if is_ddp else 0
-            if is_ddp: # create barrier, move on only if all GPUs are finished
-                torch.distributed.barrier()
-            if rank == 0: # only rank 0 writes to file
-                self.write_to_file()    
-                self.delete_LR_temp()
-            if is_ddp: # barrier again to wait until rank 0 is finished writing
-                torch.distributed.barrier()
-
-        else: # debugging options
-            print("Debugging active. Run SR and stitching individually. Note: if multi-GPU env, run only on rank 0.")
+        trainer = getattr(self, "trainer", None)
+        if self._is_rank0(trainer):
+            print(f"✅ Prediction complete! SR patches saved in 📂: {self.temp_folder}")
+            self.write_to_file()     # calls ddp_safe_stitch()
+            self.delete_LR_temp()
+        else:
+            # Non-rank0 processes: don't print, don't stitch, don't delete
+            pass
 
 
+    def _is_rank0(self,trainer=None):
+        """Return True only on the global rank 0 process."""
+        # Prefer Lightning's flag (correct across DDP/TPU/etc.)
+        if trainer is not None and hasattr(trainer, "is_global_zero"):
+            return bool(trainer.is_global_zero)
+        # Fallback to torch.distributed if initialized
+        try:
+            import torch
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                return torch.distributed.get_rank() == 0
+        except Exception:
+            pass
+        # Single process
+        return True
+    
     def create_datamodule(self):
         """
         Create a PredictionDataModule for patch-based inference.
@@ -572,99 +582,53 @@ class large_file_processing():
 
     def write_to_file(self, index_path=None, limit=None):
         """
-        Stitch saved SR patches from temp/ into the placeholder GeoTIFF.
+        Multi-GPU safe entry point for stitching super-resolved patches.
 
-        - Loads per-window metadata from `index.json`.
-        - Iterates over patch files (`.npy`/`.npz`) in order.
-        - Writes each patch into the placeholder using overlap-aware blending.
-        - Deletes temporary files in batches.
-        - Renames placeholder to `sr.tif` upon completion.
+        This method wraps around ``writing_utils.ddp_safe_stitch`` to ensure that
+        the expensive GeoTIFF write phase is performed only once (on global rank 0),
+        while all other ranks in a distributed run wait at a synchronization barrier.
+        This prevents file corruption and crashes when using PyTorch DDP.
+
+        Behavior by environment:
+        ------------------------
+        - **CPU / single process**: stitches normally.
+        - **Single GPU**: stitches normally (rank 0 is the only rank).
+        - **Multi-GPU (DDP)**: only rank 0 writes to the GeoTIFF, all other ranks
+        return immediately after the barrier.
 
         Parameters
         ----------
         index_path : str, optional
-            Path to index.json. Defaults to `<temp_folder>/index.json`.
+            Path to ``index.json`` describing all patches. Defaults to
+            ``<temp_folder>/index.json``.
         limit : int, optional
-            Maximum number of tiles to process (for debugging/testing).
+            If given, only the first ``limit`` patches are stitched
+            (useful for debugging).
 
         Notes
         -----
-        - Uses `opensr_utils.data_utils.writing_utils.write_to_placeholder`
-        for weighted blending.
-        - Cleans up `temp/` after stitching.
+        - Actual stitching and file I/O are handled by
+        :func:`opensr_utils.data_utils.writing_utils.ddp_safe_stitch`.
+        - Ensure that the placeholder GeoTIFF has already been created before
+        calling this function.
+        - Environment variables such as ``GDAL_CACHEMAX=256`` and
+        ``GDAL_NUM_THREADS=1`` are recommended for stability when running with
+        multiple processes.
         """
-        # 1) load merged index
-        if index_path is None:
-            index_path = os.path.join(self.temp_folder, "index.json")
-        with open(index_path) as f:
-            idx = json.load(f)
+        from opensr_utils.data_utils.writing_utils import ddp_safe_stitch
 
-        entries = idx["entries"]
-        entries.sort(key=lambda e: (e["row_off_lr"], e["col_off_lr"]))
-        if limit is not None:
-            entries = entries[:int(limit)]
+        # Optional: set conservative GDAL threading via env in launcher
+        # (export GDAL_CACHEMAX=256; export GDAL_NUM_THREADS=1; etc.)
 
-        # 2) build once-off info dict FROM SELF (no derived junk)
-        info_dict = {
-            "placeholder_path": os.path.join(self.placeholder_filepath),
-            "dtype": str(self.image_meta["dtype"]),
-            "factor": int(self.factor),
-            "overlap": int(self.overlap),
-            "eliminate_border_px": int(self.eliminate_border_px),
-            # window list matches loop order; index i maps directly
-            "window_coordinates": [
-                Window(e["col_off_lr"], e["row_off_lr"], e["width_lr"], e["height_lr"])
-                for e in entries
-            ],
-        }
-
-        # 3) stream tiles and write
-        container = idx.get("saved_container", "npz")
-        key = idx.get("saved_key", "arr")
-
-        to_delete = []  # paths staged for deletion
-        cleanup_every = 50  # delete staged files every N tiles (0 = never)
-        missing_count = 0 # count of missing patches
-        for i, e in enumerate(tqdm(entries, desc="Stitching → placeholder", unit="tile"), start=1):
-                p = e["path"]
-                try:
-                    # load patch
-                    if container == "npz" and p.endswith(".npz"):
-                        with np.load(p) as z:
-                            sr = z[key]  # (C,H,W), uint16 ×10000
-                    else:
-                        sr = np.load(p)
-
-                    # blend-write into placeholder
-                    blend_write(self, sr, i-1, info_dict)
-
-                    # stage for deletion
-                    to_delete.append(p)
-
-                except FileNotFoundError:
-                    missing_count += 1
-                
-                # every cleanup_every tiles, delete staged files
-                if cleanup_every and (i % cleanup_every == 0):
-                    for fp in to_delete:
-                        try:
-                            os.remove(fp)
-                        except FileNotFoundError:
-                            pass
-                        # also nuke common temp leftovers next to it
-                        for leftover in glob.glob(fp + ".*"):
-                            try:
-                                os.remove(leftover)
-                            except FileNotFoundError:
-                                pass
-                    to_delete.clear()
-
-        # rename placeholder file to sr.tif
-        sr_path = os.path.join(self.placeholder_filepath.replace("sr_placeholder.tif","sr.tif"))
-        os.rename(self.placeholder_filepath, sr_path)
-        print(f"🧩 Stitched {len(entries)} tiles into: {sr_path}")
-        if missing_count > 0:
-            print(f"⚠️ {missing_count} patch files were missing and could not be stitched.")
+        ddp_safe_stitch(
+            self,
+            index_path=index_path,
+            limit=limit,
+            cleanup_every=50,     # tune if RAM pressure
+            profile="sigmoid",     # "linear"|"sigmoid"|"cosine"
+            profile_alpha=6.0,
+            gdal_cache_mb=256,
+        )
 
     
 
