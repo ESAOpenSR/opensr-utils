@@ -398,9 +398,9 @@ def stitch_sr_patches(
     sr_path = image_meta["placeholder_path"].replace("sr_placeholder.tif", "sr.tif")
     os.replace(image_meta["placeholder_path"], sr_path)
 
-    print(f"🧩 Stitched {len(entries)} tiles into: {sr_path}")
+    self._log(f"🧩 Stitched {len(entries)} tiles into: {sr_path}")
     if missing_count > 0:
-        print(f"⚠️ {missing_count} patch files were missing and could not be stitched.")
+        self._log(f"⚠️ {missing_count} patch files were missing and could not be stitched.")
 
     return sr_path, missing_count
 
@@ -498,7 +498,7 @@ def ddp_safe_stitch(
 
         # --- overwrite logic ---
         if os.path.exists(sr_path):
-            print(f"⚠️ Existing output found at {sr_path} — will be overwritten.")
+            self._log(f"⚠️ Existing output found at {sr_path} — will be overwritten.")
             try:
                 os.remove(sr_path)
             except OSError:

@@ -108,7 +108,7 @@ class SRModelPL(LightningModule):
 
 # -------------------------------------------------------------------------
 # Preprocessor that also attaches predict_step + hooks that save predictions to disk
-def preprocess_model(model,temp_folder,windows,factor):
+def preprocess_model(self,model,temp_folder,windows,factor):
     """
     Prepare a model for distributed patch-based super-resolution inference.
 
@@ -395,10 +395,10 @@ def preprocess_model(model,temp_folder,windows,factor):
 
     # --- wrap model if needed ---
     if isinstance(model, LightningModule):
-        print("⚡ Model is a LightningModule ✅")
+        self._log("⚡ Model is a LightningModule ✅")
         model.eval()
     elif isinstance(model, torch.nn.Module):
-        print("Model is a torch.nn.Module. Wrapping in LightningModule ✅.")
+        self._log("Model is a torch.nn.Module. Wrapping in LightningModule ✅.")
         class WrappedModel(LightningModule):
             def __init__(self, mdl):
                 super().__init__()
@@ -409,7 +409,7 @@ def preprocess_model(model,temp_folder,windows,factor):
         wrapped_model.eval()
         model = wrapped_model
     elif model is None:
-        print("⚠️ No model provided - using placeholder interpolation model.")
+        self._log("⚠️ No model provided - using placeholder interpolation model.")
         placeholder_model = SRModelPL()
         placeholder_model.eval()
         model = placeholder_model

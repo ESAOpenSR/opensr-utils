@@ -15,6 +15,7 @@ import json
 import os
 import glob
 import shutil
+from datetime import datetime
 
 # Geo
 import rasterio
@@ -194,8 +195,12 @@ class large_file_processing():
         self.image_meta = {} # dict to hold image metadata - gets filled by get_image_meta
         self.input_type = None # file, SAFE or S2GM - gets filled by verify_input_file_type
         self.placeholder_filepath = None # filepath of empty SR placeholder - gets filled by create_placeholder_file
-        self.placeholder_dir = None # directory of empty SR placeholder - gets filled by create_placeholder_file
+        self.placeholder_path = self.root if os.path.isdir(self.root) else os.path.dirname(self.root) # set file path early
+        self.log_dir = None # directory for logs - gets filled by create_placeholder_file
         self.temp_folder = None # folder of temporary files - gets filled by create_placeholder_file
+
+        # create temp and log dirs etc up front
+        self.create_dirs()
 
         # Verifying type of input: file, SAFE or S2GM folder
         self.verify_input_file_type(self.root)
@@ -210,45 +215,50 @@ class large_file_processing():
         self.create_datamodule()
         
         # Make sure model is useable and in eval mode
-        self.model = preprocess_model(model,
+        self.model = preprocess_model(self,model,
                                       temp_folder=self.temp_folder,
                                       windows=self.image_meta["image_windows"],
                                       factor=self.factor)
 
         # Print Status
-        print("\n")
-        print("📊 Status: Model and Data ready for inference ✅")
+        self._log("📊 Status: Model and Data ready for inference ✅")
         
         # If in standard mode, run everything right away
         if self.debug!=True:
-            print("🚀 Runing SR...")
             self.start_super_resolution(debug=self.debug)    
             
         trainer = getattr(self, "trainer", None)
         if self._is_rank0(trainer):
-            print(f"✅ Prediction complete! SR patches saved in 📂: {self.temp_folder}")
             self.write_to_file()     # calls ddp_safe_stitch()
             self.delete_LR_temp()
-        else:
-            # Non-rank0 processes: don't print, don't stitch, don't delete
+        else: # Non-rank0 processes: don't print, don't stitch, don't delete
             pass
 
-
-    def _is_rank0(self,trainer=None):
-        """Return True only on the global rank 0 process."""
-        # Prefer Lightning's flag (correct across DDP/TPU/etc.)
-        if trainer is not None and hasattr(trainer, "is_global_zero"):
-            return bool(trainer.is_global_zero)
-        # Fallback to torch.distributed if initialized
-        try:
-            import torch
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
-                return torch.distributed.get_rank() == 0
-        except Exception:
-            pass
-        # Single process
-        return True
     
+    def create_dirs(self):
+        # Sets all paths to all files, logs, temp files, etc
+        # 1. Create placeholder file path variable
+        # This is a bit cursed, but it works for files and folders
+        out_name = "sr_placeholder.tif"
+        output_file_path = os.path.join(self.placeholder_path, out_name)
+        self.output_file_path = output_file_path
+        # also set placeholder path in metadata
+        self.image_meta["placeholder_filepath"] = output_file_path
+        self.image_meta["placeholder_dir"] = self.placeholder_path
+        self.placeholder_filepath = output_file_path
+        # create log dir path
+        self.log_dir = os.path.join(self.placeholder_path,"logs")
+        self.log_file = os.path.join(self.log_dir,"log.txt")
+        os.makedirs(self.log_dir, exist_ok=True)
+        # create log file
+        with open(self.log_file, 'w') as f:
+            f.write(f"Log file created at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+        # 2. Creating temporary folder for storing batches during prediction
+        temp_folder_path = os.path.join(os.path.dirname(output_file_path),"temp")
+        self.temp_folder_path = temp_folder_path
+        self.temp_folder = temp_folder_path
+
     def create_datamodule(self):
         """
         Create a PredictionDataModule for patch-based inference.
@@ -261,6 +271,7 @@ class large_file_processing():
                               windows = self.image_meta["image_windows"],
                               prefetch_factor=2, batch_size=16, num_workers=4)
         dm.setup()
+        self._log(f"📦 Created PredictionDataModule with {len(dm.dataset)} patches.")
         self.datamodule = dm
 
     def verify_input_file_type(self, root):
@@ -283,6 +294,7 @@ class large_file_processing():
         elif os.path.isdir(root):
             input_type = "folder"
         else:
+            self._log("🚫 Input path is neither a 📄 file nor a 📁 folder. 👉 Please provide a valid input path.")
             raise NotImplementedError(
                 "🚫 Input path is neither a 📄 file nor a 📁 folder. 👉 Please provide a valid input path."
             )
@@ -290,23 +302,22 @@ class large_file_processing():
         # Verifying type of input: file, SAFE or S2GM folder
         if input_type=="file":
             self.input_type = "file"
-            self.placeholder_path = os.path.dirname(self.root)
-            self.image_meta["placeholder_path"] = self.placeholder_path
-            if can_read_directly_with_rasterio(self.root) == False:
+            if can_read_directly_with_rasterio(self,self.root) == False:
+                self._log("🚫 Input is a file, but this file type cannot be opened by 'rasterio' ❌📂")
                 raise NotImplementedError(
                     "🚫 Input is a file, but this file type cannot be opened by 'rasterio' ❌📂"
                 )
             else:
-                print("📄 Input is a file, can be opened with rasterio — processing possible! 🚀")
+                self._log("📄 Input is a file, can be opened with rasterio — processing possible! 🚀")
         elif input_type=="folder":
-            self.placeholder_path = self.root
             if self.root.replace("/","")[-5:] == ".SAFE":
-                print("📁 Input is Sentinel-2 .SAFE folder, processing possible! 🚀")
+                self._log("📁 Input is Sentinel-2 .SAFE folder, processing possible! 🚀")
                 self.input_type = "SAFE"
             elif "S2GM" in self.root:
-                print("📁 Input is Sentinel-2 S2GM folder, processing possible! 🚀")
+                self._log("📁 Input is Sentinel-2 S2GM folder, processing possible! 🚀")
                 self.input_type = "S2GM"
             else:
+                self._log("🚫 Input folder is not in .SAFE format or S2GM format. 👉 Please provide a valid input folder.")
                 raise NotImplementedError("🚫 Input folder is not in .SAFE format or S2GM format. 👉 Please provide a valid input folder.")
         
     def get_image_meta(self, root_dir):
@@ -371,31 +382,19 @@ class large_file_processing():
 
         Skips creation if placeholder already exists.
         """
-        # 1. Create placeholder file path variable
-        out_name = "sr_placeholder.tif"
-        output_file_path = os.path.join(self.placeholder_path, out_name)
-        # also set placeholder path in metadata
-        self.image_meta["placeholder_filepath"] = output_file_path
-        self.image_meta["placeholder_dir"] = self.placeholder_dir
-        self.placeholder_filepath = output_file_path
-        self.placeholder_dir = self.placeholder_dir
-        
-        # 2. Creating temporary folder for storing batches during prediction
-        temp_folder_path = os.path.join(os.path.dirname(output_file_path),"temp")
-        self.temp_folder = temp_folder_path
         
         # 3. Create placeholder file if it does not exist yet, otherwise skip
-        if os.path.exists(output_file_path):
-            print("⚠️ Placeholder already exists: ",temp_folder_path)
+        if os.path.exists(self.output_file_path):
+            self._log(f"⚠️ Placeholder already exists: {self.temp_folder_path}")
         
         # 4. If it does not exist, create it
         else:
-            os.makedirs(temp_folder_path, exist_ok=True)
-            print(f"📂 Created temporary folder at: {output_file_path}")
+            os.makedirs(self.temp_folder_path, exist_ok=True)
+            self._log(f"📂 Created temporary folder at: {self.temp_folder_path}")
             
         # If sr_placeholder file exists and force is False, skip creation
         if os.path.exists(self.placeholder_filepath) and force==False:
-            print(f"⚠️ Placeholder file already exists — skipping creation.")
+            self._log(f"⚠️ Placeholder file already exists — skipping creation.")
         else:  
             nb = int(self.image_meta["bands"])
             W  = int(self.image_meta["width"]  * self.factor)
@@ -427,9 +426,9 @@ class large_file_processing():
                 "sparse_ok": True,
             }
             # Create the dataset and close without writing any pixels
-            with rasterio.open(output_file_path, "w", **profile):
+            with rasterio.open(self.output_file_path, "w", **profile):
                 pass
-            print(f"💾 Saved empty placeholder SR image at: {output_file_path}")
+            self._log(f"💾 Saved empty placeholder SR image at: {self.output_file_path}")
 
 
         
@@ -511,7 +510,7 @@ class large_file_processing():
         Cleans up after prediction and stitching.
         """
         shutil.rmtree(self.temp_folder)
-        print("🗑️📂 Deleted temporary folder at:",self.temp_folder)
+        self._log(f"🗑️📂 Deleted temporary folder at: {self.temp_folder}")
 
     def start_super_resolution(self, debug: bool = False):
         """
@@ -533,6 +532,8 @@ class large_file_processing():
         - No checkpoints or logs are created during prediction.
         """
         # Pick windows (debug trims to first 100 globally; DDP sampler will shard those across ranks)
+        self._log("🚀 Runing SR...")
+
         windows_all = self.image_meta["image_windows"]
         windows_run = windows_all[:100] if debug else windows_all
 
@@ -560,7 +561,7 @@ class large_file_processing():
             msg = str(e)
             if "Lightning can't create new processes if CUDA is already initialized" in msg:
                 # Stop the workflow cleanly (no noisy traceback for users)
-                print(
+                self._log(
                     "🚨🔥 STOPPING WORKFLOW 🔥🚨\n"
                     "⚠️  CUDA was already initialized before launching DDP!\n"
                     "🖥️  This is a multi-GPU processing limitation of PyTorch Lightning.\n"
@@ -576,9 +577,9 @@ class large_file_processing():
         is_ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
         rank = torch.distributed.get_rank() if is_ddp else 0
         if rank == 0:
-            print(f"✅ Prediction complete! SR patches saved in 📂: {self.temp_folder}")
+            self._log(f"✅ Prediction complete! SR patches saved in 📂: {self.temp_folder}")
             if debug:
-                print("Debug mode was ON → processed only 100 windows.")
+                self._log("Debug mode was ON → processed only 100 windows.")
 
     def write_to_file(self, index_path=None, limit=None):
         """
@@ -630,7 +631,35 @@ class large_file_processing():
             gdal_cache_mb=256,
         )
 
+    def _is_rank0(self,trainer=None):
+        """Return True only on the global rank 0 process."""
+
+        # Prefer Lightning's flag (correct across DDP/TPU/etc.)
+        if trainer is not None and hasattr(trainer, "is_global_zero"):
+            return bool(trainer.is_global_zero)
+        # Fallback to torch.distributed if initialized
+        try:
+            import torch
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                return torch.distributed.get_rank() == 0
+        except Exception:
+            pass
+        # Single process
+        return True
+
     
+
+    def _log(self, message):
+        """Print a message only on rank 0."""
+        # timestamp prefix
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        
+        if self._is_rank0(getattr(self, "trainer", None)):
+            print(line)
+        # append message to file
+        with open(self.log_file, "a") as f:
+            f.write(line + "\n")
 
 
 def main():

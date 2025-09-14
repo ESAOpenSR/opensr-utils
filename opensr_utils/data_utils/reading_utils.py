@@ -1,7 +1,7 @@
 import os
 import rasterio
 
-def can_read_directly_with_rasterio(filename):
+def can_read_directly_with_rasterio(self,filename):
     """
     Check whether a given raster file can be opened directly with rasterio.
 
@@ -59,8 +59,8 @@ def can_read_directly_with_rasterio(filename):
             with rasterio.open(filename) as src:
                 return True
         except rasterio.errors.RasterioIOError:
-            print(f"Rasterio can't open {filename}.")
+            self._log(f"Rasterio can't open {filename}.")
             return False
     else:
-        print(f"Unsupported file extension for {filename}.")
+        self._log(f"Unsupported file extension for {filename}.")
         return False
