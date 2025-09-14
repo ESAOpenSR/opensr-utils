@@ -5,6 +5,8 @@ import numpy as np
 from pytorch_lightning import LightningModule
 import time
 import glob
+from PIL import Image
+
 """
 Multi-GPU SR Inference Workflow
 ================================
@@ -162,7 +164,6 @@ def preprocess_model(self,model,temp_folder,windows,factor):
     - Final `index.json` is consumed by the stitching stage.
     """
     
-    
     # --- define hooks here so they stay out of the global namespace ---
     def _rank_world(self):
         """
@@ -255,6 +256,38 @@ def preprocess_model(self,model,temp_folder,windows,factor):
                 "row_off_hr": row_off_hr,   "col_off_hr": col_off_hr,
                 "height_hr":  int(Hh),      "width_hr":  int(Ww),
             })
+
+            # --- NEW: milestone preview save on rank 0 ---
+            ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
+            is_rank0 = (not ddp) or (self._rank == 0)
+            if is_rank0:
+                interval = model.model_dm_length
+                if (self._local_idx % 2 == 0):  # every n patches
+                    # CHW -> take RGB (or gray→RGB)
+                    if arr.shape[0] >= 3:
+                        rgb = arr[:3, :, :]
+                    else:
+                        rgb = np.repeat(arr[:1, :, :], 3, axis=0)
+                    
+                    x_i = x[i].detach().cpu()             # CHW float
+                    if x_i.shape[0] >= 3:
+                        lr_rgb = x_i[:3, :, :].numpy()
+                    else:
+                        lr_rgb = np.repeat(x_i[:1, :, :].numpy(), 3, axis=0)
+
+                    # scale [0..10000] -> [0..255] with optional gain
+                    gain = 3.5
+                    rgb = (((rgb/10_000)*gain)*255.0).astype(np.uint8).clip(0,255)
+                    lr_rgb = (((lr_rgb)*gain)*255.0).astype(np.uint8).clip(0,255)
+
+                    # CHW -> HWC for PIL
+                    rgb,lr_rgb = np.transpose(rgb, (1, 2, 0)), np.transpose(lr_rgb, (1, 2, 0))
+
+                    # save
+                    Image.fromarray(rgb).save(os.path.join(self.log_dir, f"preview_sr_{self._local_idx:06d}.png"))
+                    Image.fromarray(lr_rgb).save(os.path.join(self.log_dir, f"preview_lr_{self._local_idx:06d}.png"))
+
+
         return None
 
     def on_predict_end(self):
@@ -418,6 +451,8 @@ def preprocess_model(self,model,temp_folder,windows,factor):
 
 
     # set model variables
+    model.log_dir = self.log_dir # set log dir for previews
+    model.model_dm_length = len(self.datamodule.dataset) # set datamodule length for preview interval
     model = _attach_hooks(model)
     model._save_temp_folder = temp_folder
     model._save_windows = windows

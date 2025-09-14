@@ -495,6 +495,7 @@ def ddp_safe_stitch(
     if is_rank0:
         placeholder = self.placeholder_filepath
         sr_path = placeholder.replace("sr_placeholder.tif", "sr.tif")
+        self.final_sr_path = sr_path
 
         # --- overwrite logic ---
         if os.path.exists(sr_path):

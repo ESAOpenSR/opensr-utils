@@ -239,4 +239,4 @@ class PredictionDataModule(LightningDataModule):
 
     def predict_dataloader(self):
         return DataLoader(self.dataset, num_workers=self.num_workers,
-                          batch_size=self.batch_size, prefetch_factor=self.prefetch_factor)
+                          batch_size=self.batch_size, prefetch_factor=self.prefetch_factor,shuffle=True)

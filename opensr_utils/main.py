@@ -228,9 +228,32 @@ class large_file_processing():
             self.start_super_resolution(debug=self.debug)    
             
         trainer = getattr(self, "trainer", None)
-        if self._is_rank0(trainer):
+        if self._is_rank0(trainer): # only run this on one single process
+            self._log("🪡 Stitching results into final sr.tif...")
+            # 1. Write overlapping patches from temp dir to placeholder file
             self.write_to_file()     # calls ddp_safe_stitch()
+            
+            # 2. delete temp folder
             self.delete_LR_temp()
+
+            # 3. Save examples to logs dir
+            # 3.1 Save one georeferenced patch
+            from opensr_utils.data_utils.result_analysis import crop_and_save_georeferenced_excerpt, generate_side_by_side_previews
+            tif_path = self.final_sr_path
+            crop_and_save_georeferenced_excerpt(self,
+                tif_path=tif_path,
+                out_tif=os.path.join(self.log_dir,"cropped_excerpt.tif"),
+                random_crop_size=(512, 512)
+            )
+            self._log("✅ Saved an example SR patch to cropped_excerpt.tif in logs folder.")
+            # 3.2 Save 10 side-by-side previews
+            num_examples = 10
+            generate_side_by_side_previews(self,
+                tif_path=tif_path,
+                out_dir=self.log_dir,
+                num_examples=num_examples
+            )
+            self._log(f"✅ Saved {num_examples} side-by-side preview images to logs folder.")
         else: # Non-rank0 processes: don't print, don't stitch, don't delete
             pass
 
@@ -246,8 +269,10 @@ class large_file_processing():
         self.image_meta["placeholder_filepath"] = output_file_path
         self.image_meta["placeholder_dir"] = self.placeholder_path
         self.placeholder_filepath = output_file_path
-        # create log dir path
         self.log_dir = os.path.join(self.placeholder_path,"logs")
+        # create log dir path
+        if os.path.exists(self.log_dir):  # if already exists, delete it first
+            shutil.rmtree(self.log_dir)
         self.log_file = os.path.join(self.log_dir,"log.txt")
         os.makedirs(self.log_dir, exist_ok=True)
         # create log file
@@ -617,9 +642,6 @@ class large_file_processing():
         multiple processes.
         """
         from opensr_utils.data_utils.writing_utils import ddp_safe_stitch
-
-        # Optional: set conservative GDAL threading via env in launcher
-        # (export GDAL_CACHEMAX=256; export GDAL_NUM_THREADS=1; etc.)
 
         ddp_safe_stitch(
             self,

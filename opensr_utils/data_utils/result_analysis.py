@@ -19,6 +19,7 @@ def stretch(arr: np.ndarray) -> np.ndarray:
 
 
 def generate_side_by_side_previews(
+    self,
     tif_path: str,
     out_dir: str,
     num_examples: int = 100,
@@ -40,7 +41,7 @@ def generate_side_by_side_previews(
                 arr = src.read(window=win)
             else:
                 arr = src.read()
-                print(f"⚠️ Image too small for window, using full image for sample {i}")
+                self._log(f"⚠️ Image too small for window, using full image for sample {i}")
 
             resized = resize(arr, (4, *target_size), order=1, preserve_range=True, anti_aliasing=True)
 
@@ -69,10 +70,11 @@ def generate_side_by_side_previews(
             plt.tight_layout()
             plt.savefig(out_path, dpi=150)
             plt.close()
-            print(f"✅ Saved {out_path}")
+            self._log(f"✅ Saved preview PNG at {out_path}")
 
 
 def crop_and_save_georeferenced_excerpt(
+    self,
     tif_path: str,
     out_tif: str,
     random_crop_size: Tuple[int, int] = (512, 512),
@@ -128,7 +130,7 @@ def crop_and_save_georeferenced_excerpt(
     left = np.random.randint(0, W - crop_w + 1)
     crop = data[:, top:top+crop_h, left:left+crop_w]
 
-    print(f"✅ Saved example SR patch to {out_tif}")
+    self._log(f"✅ Saved georeferenced example SR patch of size {crop.shape} to {out_tif}")
 
 
 if __name__ == "__main__":
