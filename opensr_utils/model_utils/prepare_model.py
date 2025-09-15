@@ -5,6 +5,7 @@ import numpy as np
 from pytorch_lightning import LightningModule
 import time
 import glob
+import math
 from PIL import Image
 
 """
@@ -107,6 +108,27 @@ class SRModelPL(LightningModule):
         return sr
     def predict(self,x):
         return self.forward(x)
+    
+    
+def get_world_info():
+    """
+    Return (world_size, rank) in a robust way:
+    - CPU or single-GPU: world_size = 1
+    - Multi-GPU DDP: world_size = number of GPUs (world size)
+    """
+    ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
+
+    if ddp:
+        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
+    else:
+        # if CUDA is available, check how many GPUs are visible
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        world_size = gpu_count if gpu_count > 1 else 1
+        rank = 0
+
+    return world_size, rank
+
 
 # -------------------------------------------------------------------------
 # Preprocessor that also attaches predict_step + hooks that save predictions to disk
@@ -257,12 +279,16 @@ def preprocess_model(self,model,temp_folder,windows,factor):
                 "height_hr":  int(Hh),      "width_hr":  int(Ww),
             })
 
-            # --- NEW: milestone preview save on rank 0 ---
-            ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
-            is_rank0 = (not ddp) or (self._rank == 0)
+            # logic to calculate logging steps - every 10% of total
+            ddp  = torch.distributed.is_available() and torch.distributed.is_initialized()
+            rank = torch.distributed.get_rank() if ddp else 0
+            world= torch.distributed.get_world_size() if ddp else 1
+            is_rank0 = (rank == 0)
+            global_total = int(model.model_dm_length)
+            local_interval = max(1, math.ceil((global_total / max(world,1)) / 10))
             if is_rank0:
-                interval = model.model_dm_length
-                if (self._local_idx % 2 == 0):  # every n patches
+                # avoid firing at 0
+                if global_total > 0 and self._local_idx > 0 and (self._local_idx % local_interval == 0):
                     # CHW -> take RGB (or gray→RGB)
                     if arr.shape[0] >= 3:
                         rgb = arr[:3, :, :]

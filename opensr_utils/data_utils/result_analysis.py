@@ -23,7 +23,7 @@ def generate_side_by_side_previews(
     tif_path: str,
     out_dir: str,
     num_examples: int = 100,
-    window_size: int = 5000,
+    window_size: int = 2000,
     crop_size: int = 512,
     target_size: Tuple[int, int] = (512, 512),
 ):
@@ -60,7 +60,7 @@ def generate_side_by_side_previews(
 
             fig, axes = plt.subplots(1, 2, figsize=(8, 4))
             axes[0].imshow(left_img)
-            axes[0].set_title("Resized Full Window")
+            axes[0].set_title("Overview")
             axes[1].imshow(right_img)
             axes[1].set_title("Center Native Crop")
             for ax in axes:
