@@ -58,7 +58,7 @@ opensr-run /data/flood_scene.tif LDSRS2   --window_size 128 128   --factor 4   -
 
 **Arguments explained:**
 - `root` → Path to the input file or folder (`.tif`, `.SAFE`, or S2GM).  
-- `model` → Must be `LDSRS2` (any other value falls back to a no-model pipeline).  
+- `model` → Must be `LDSRS2` for CLI usage (any other value falls back to a no-model pipeline).  
 - `--window_size` → Patch size in LR pixels (default: `128 128`).  
 - `--factor` → Upscaling factor (default: `4`).  
 - `--overlap` → Overlap in pixels to avoid patch seams (default: `8`).  

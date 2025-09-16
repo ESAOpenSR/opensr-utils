@@ -35,20 +35,24 @@ def main():
     if args.model == "LDSRS2":
         # Lazy import to avoid CUDA init unless needed
         try:
+            from omegaconf import OmegaConf
+            from io import StringIO
+            import requests  # your model package
             import opensr_model  # your model package
-            # You likely have a helper/config; adjust as needed:
-            # config = opensr_model.load_default_config()
-            # model = opensr_model.SRLatentDiffusion(config)
-            # model.load_pretrained(config.ckpt_version)
-            #
-            # If you prefer a thin wrapper:
-            model = opensr_model.get_default_model()  # <- implement in your model pkg
+            # Instantiate model
+            device = "cpu"  # "cuda" or "cpu" - Dont use the torch automated detection here, it messes up the lightning trainer multi-GPU setup
+            config_url = "https://raw.githubusercontent.com/ESAOpenSR/opensr-model/refs/heads/main/opensr_model/configs/config_10m.yaml"
+            response = requests.get(config_url)
+            config = OmegaConf.load(StringIO(response.text))
+            model = opensr_model.SRLatentDiffusion(config, device=device)
+            model.load_pretrained(config.ckpt_version)
+
         except Exception as e:
             print("❌ Could not load LDSR-S2 model from 'opensr_model'.")
             print(f"   Error: {e}")
             return
     else:
-        print("ℹ️ From CL, you can only run the LDSR-S2 model.")
+        print("ℹ️ From CL, you can only run the LDSR-S2 model. Using interpolation placeholder instead")
         model = None  # placeholder/no-model mode (still stitches pipeline outputs if provided)
 
     # --- Run the pipeline ---
