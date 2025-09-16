@@ -1,5 +1,9 @@
-import os
 import rasterio
+import os, shutil, zipfile
+from pathlib import Path
+from datetime import datetime
+
+
 
 def can_read_directly_with_rasterio(self,filename):
     """
@@ -64,3 +68,139 @@ def can_read_directly_with_rasterio(self,filename):
     else:
         self._log(f"Unsupported file extension for {filename}.")
         return False
+
+
+def create_dirs(self):
+    """
+    Create the working directory structure for large-file super-resolution.
+
+    Based on the resolved input type (`file`, `SAFE`, or `S2GM`), this function 
+    determines the appropriate *base directory* and sets up the following:
+
+    - `logs/` folder: stores log files and preview outputs.
+    - `temp/` folder: stores intermediate SR patches during inference.
+    - Final SR outputs (e.g., `sr.tif`) are written directly into the base directory.
+    - `sr_placeholder.tif`: an empty GeoTIFF placeholder created in the base 
+      directory to receive stitched SR results.
+
+    Rules for determining the base directory
+    ----------------------------------------
+    - If input is a `.SAFE` folder → use its parent folder.
+    - If input is a single raster file → use the file's parent folder.
+    - If input is an `S2GM` folder → use the folder itself.
+
+    Side Effects
+    ------------
+    - Creates directories if they do not exist.
+    - Sets the following attributes on `self`:
+        * `self.placeholder_path` : str → path to the base directory
+        * `self.log_dir`          : str → path to `logs/` folder
+        * `self.temp_folder`      : str → path to `temp/` folder
+        * `self.output_dir`       : str → path to base directory (for `sr.tif`)
+        * `self.placeholder_filepath` : str → path to placeholder GeoTIFF
+        * `self.output_file_path`     : str → alias for placeholder filepath
+        * `self.image_meta["placeholder_dir"]`
+        * `self.image_meta["placeholder_filepath"]`
+
+    Notes
+    -----
+    - This function does not create the placeholder file itself; it only sets
+      paths and directories. Call `create_placeholder_file()` afterwards to
+      initialize `sr_placeholder.tif`.
+    - Ensures idempotency: repeated calls will not overwrite directories.
+    - Keeps both `self.output_file_path` and `self.placeholder_filepath` for
+      compatibility with downstream code.
+    """
+    p = Path(self.root)
+    if self.input_type == "SAFE":
+        base = p.parent
+    elif self.input_type == "file":
+        base = p.parent
+    elif self.input_type == "S2GM":
+        base = p
+    else:
+        base = p
+
+    self.placeholder_path = str(base)
+
+    os.makedirs(base / "logs", exist_ok=True)
+    os.makedirs(base / "temp", exist_ok=True)
+
+    self.log_dir = str(base / "logs")
+    self.temp_folder = str(base / "temp")
+
+    # create log file
+    self.log_file  = base / "logs" / "log.txt"
+    open(self.log_file, 'a').close()
+    self._log(f"🗂️  Logs will be saved to: {self.log_file}")
+
+    # final SR will go directly into base (no sr/ subfolder)
+    self.output_dir = str(base)  
+
+    self.placeholder_filepath = str(base / "sr_placeholder.tif")
+    self.output_file_path     = self.placeholder_filepath
+    
+
+    self.image_meta["placeholder_dir"] = self.placeholder_path
+    self.image_meta["placeholder_filepath"] = self.placeholder_filepath
+
+
+def verify_input_file_type(self, root):
+    """
+    Resolve the input type before any dirs/logging are created:
+    - Regular raster file (rasterio-readable)
+    - Sentinel-2 .SAFE folder
+    - Sentinel-2 S2GM folder
+    - .zip archive containing a .SAFE folder (from Copernicus Hub)
+
+    Sets:
+        self.root        → final usable path (file or folder)
+        self.input_type  → "file" | "SAFE" | "S2GM"
+
+    Notes:
+        Logs here are printed to stdout.
+    """
+    self.root = str(root)
+    p = Path(self.root)
+
+    # --- ZIP case ---
+    if p.is_file() and p.suffix.lower() == ".zip":
+        self._log(f"📦 Unzipping: {p.name}")
+        extract_dir = p.parent / p.stem
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(p, "r") as zf:
+            zf.extractall(extract_dir)
+
+        if self.debug==False: # only delete if not debugging
+            p.unlink()  # delete the zip
+            self._log(f"🗑️ Deleted archive: {p.name}")
+
+        safe_candidates = list(extract_dir.rglob("*.SAFE"))
+        if not safe_candidates:
+            raise NotImplementedError("🚫 Archive does not contain a .SAFE folder.")
+        self.root = str(safe_candidates[0])
+        self.input_type = "SAFE"
+        self._log(f"📁 Found .SAFE folder: {self.root}")
+
+    # --- File case ---
+    elif p.is_file():
+        self.input_type = "file"
+        if not can_read_directly_with_rasterio(self, self.root):
+            raise NotImplementedError("🚫 File type not supported by rasterio ❌")
+        self._log("📄 Raster file OK — processing possible! 🚀")
+
+    # --- SAFE folder ---
+    elif p.is_dir() and p.name.endswith(".SAFE"):
+        self.input_type = "SAFE"
+        self._log("📁 Input is Sentinel-2 .SAFE folder — processing possible! 🚀")
+
+    # --- S2GM folder ---
+    elif p.is_dir() and "S2GM" in str(p):
+        self.input_type = "S2GM"
+        self._log("📁 Input is Sentinel-2 S2GM folder — processing possible! 🚀")
+
+    else:
+        raise NotImplementedError("🚫 Input path is not valid (file, .SAFE, or S2GM).")
+
+    # ✅ At this point, self.root + self.input_type are FINAL

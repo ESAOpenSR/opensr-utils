@@ -44,46 +44,22 @@ class PredictionDataset(Dataset):
     - Band order is always RGB+NIR (4 channels).
     """
 
-    def __init__(self,input_type,root,windows):
+    def __init__(self,input_type,root,windows,lr_file_dict):
         # Set properties
         self.input_type = input_type
         self.root = root
         self.windows = windows
         
-        # 1. If file, nothing necessary
+        # 1. If file
         if self.input_type == "file":
-            pass
-        # 2. If SAFE, parse SAFE structure to get file paths
+            self.lr_file_dict = lr_file_dict
+        # 2. If SAFE
         elif self.input_type == "SAFE":
-            # Find JP2s for 10 m bands (B02,B03,B04,B08) under IMG_DATA
-            jp2s = []
-            for root, _, files in os.walk(self.root):
-                if "IMG_DATA" in root:
-                    for f in files:
-                        if f.endswith(".jp2") and any(b in f for b in ("B02", "B03", "B04", "B08")):
-                            jp2s.append(os.path.join(root, f))
-            jp2s = sorted(jp2s)  # Sort to maintain consistent band order
-            self.jp2_dict = {
-                "R": [p for p in jp2s if "B04" in p][0],
-                "G": [p for p in jp2s if "B03" in p][0],
-                "B": [p for p in jp2s if "B02" in p][0],
-                "NIR": [p for p in jp2s if "B08" in p][0],
-            }
+            self.lr_file_dict = lr_file_dict
+        # 3. If S2GM
         elif self.input_type == "S2GM":
-            # Collect per-band GeoTIFFs in the given tile folder
-            tifs = []
-            for root, _, files in os.walk(self.root):
-                for f in files:
-                    if f.lower().endswith(".tif"):
-                        tifs.append(os.path.join(root, f))
+            self.lr_file_dict = lr_file_dict
 
-            # Hard-map to RGB + NIR
-            self.s2gm_files = {
-                "R":  [p for p in tifs if os.path.basename(p) == "B04.tif"][0],
-                "G":  [p for p in tifs if os.path.basename(p) == "B03.tif"][0],
-                "B":  [p for p in tifs if os.path.basename(p) == "B02.tif"][0],
-                "NIR":[p for p in tifs if os.path.basename(p) == "B08.tif"][0],
-            }
 
     def __len__(self):
         return len(self.windows)
@@ -103,9 +79,9 @@ class PredictionDataset(Dataset):
         if self.input_type == "file":
             img = self.get_from_file(idx)
         elif self.input_type == "SAFE":
-            img = self.get_from_SAFE(idx)
+            img = self.get_from_dict(idx)
         elif self.input_type == "S2GM":
-            img = self.get_from_S2GM(idx)
+            img = self.get_from_dict(idx)
         else:
             raise NotImplementedError(f"Input type {self.input_type} not supported.")    
         # perform normalizations here
@@ -136,7 +112,7 @@ class PredictionDataset(Dataset):
         data = data.astype(np.float32)
         return torch.from_numpy(data)
     
-    def get_from_SAFE(self, idx):
+    def get_from_dict(self, idx):
         """
         Read RGB+NIR bands from a Sentinel-2 SAFE folder for a given window.
 
@@ -154,32 +130,7 @@ class PredictionDataset(Dataset):
         bands_order = ["R", "G", "B", "NIR"]
         tiles = []
         for b in bands_order:
-            with rasterio.open(self.jp2_dict[b]) as src:
-                tile = src.read(1, window=window)
-                tiles.append(tile)
-        arr = np.stack(tiles, axis=0).astype(np.float32)
-        return torch.from_numpy(arr)
-    
-    def get_from_S2GM(self, idx):
-        """
-        Read RGB+NIR bands from a Sentinel-2 Global Mosaic (S2GM) tile folder.
-
-        Parameters
-        ----------
-        idx : int
-            Index of the window to read.
-
-        Returns
-        -------
-        torch.FloatTensor
-            (4,H,W) patch with bands in [R,G,B,NIR] order, float32.
-        """
-        window = self.windows[idx]
-        order = ["R", "G", "B", "NIR"]
-
-        tiles = []
-        for k in order:
-            with rasterio.open(self.s2gm_files[k]) as src:
+            with rasterio.open(self.lr_file_dict[b]) as src:
                 tile = src.read(1, window=window)
                 tiles.append(tile)
         arr = np.stack(tiles, axis=0).astype(np.float32)
@@ -214,12 +165,13 @@ class PredictionDataModule(LightningDataModule):
     dataset : PredictionDataset
         Dataset instance created during `setup()`.
     """
-    def __init__(self, input_type,root,windows,
+    def __init__(self, input_type,root,windows,lr_file_dict,
                  prefetch_factor=2, batch_size=16, num_workers=4):
         super().__init__()
         self.input_type = input_type
         self.root = root
         self.windows = windows
+        self.lr_file_dict = lr_file_dict
         self.num_workers = num_workers
         self.batch_size = batch_size
         self.prefetch_factor = prefetch_factor
@@ -235,7 +187,8 @@ class PredictionDataModule(LightningDataModule):
         """
         self.dataset = PredictionDataset(input_type=self.input_type,
                                      root=self.root,
-                                     windows=self.windows)
+                                     windows=self.windows,
+                                     lr_file_dict=self.lr_file_dict)
 
     def predict_dataloader(self):
         return DataLoader(self.dataset, num_workers=self.num_workers,
