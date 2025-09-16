@@ -9,6 +9,6 @@ except Exception:
     __version__ = "unknown"
 
 # expose high-level class for convenience
-from .main import large_file_processing
+from .pipeline import large_file_processing
 
 __all__ = ["large_file_processing", "__version__"]

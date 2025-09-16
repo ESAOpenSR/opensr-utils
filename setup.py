@@ -30,9 +30,9 @@ setup(
         'omegaconf',
         'requests',
     ],
-    entry_points={
-        "console_scripts": [
-            "opensr-utils=opensr_utils.large_file_processing:main",
-        ],
-    },
+        entry_points={
+                "console_scripts": [
+                    "opensr-run=opensr_utils.cli:main",
+                ],
+            },
 )
