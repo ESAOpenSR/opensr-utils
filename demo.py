@@ -12,16 +12,9 @@ from io import StringIO
 
 
 # --- 1) Create Model -------------------------------------------------
-import opensr_model  # import package
-
 device = "cuda"  # or "cpu" - Dont use the automated detection, it messes up the lightning trainer multi-GPU setup
-
-# Instantiate model
-config_url = "https://raw.githubusercontent.com/ESAOpenSR/opensr-model/refs/tags/v0.3.1/opensr_model/configs/config_10m.yaml"
-response = requests.get(config_url)
-config = OmegaConf.load(StringIO(response.text))
-model = opensr_model.SRLatentDiffusion(config, device=device) # create model
-model.load_pretrained(config.ckpt_version)
+from opensr_utils.model_utils.get_models import get_ldsrs2
+model = get_ldsrs2()
 
 # --- 2) Run large-scale Inference ------------------------------------
 import opensr_utils

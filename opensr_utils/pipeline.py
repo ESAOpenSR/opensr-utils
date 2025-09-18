@@ -614,34 +614,3 @@ class large_file_processing():
             # in case file is not writable, keep line in backlog
             self._log_backlog.append(line)
 
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="🚀 Patch-based super-resolution for large geospatial rasters"
-    )
-    parser.add_argument("root", type=str, help="📂 Path to input file/folder")
-    
-    parser.add_argument("model", type=str, choices=["LDSRS2", "None"],
-                        help="🤖 Model to run: 'LDSRS2' or 'None'")
-    
-    parser.add_argument("--window_size", type=int, nargs=2, default=(128, 128),
-                        help="🔲 LR window size (default: 128 128)")
-    parser.add_argument("--factor", type=int, default=4, choices=[2, 4, 6, 8],
-                        help="⬆️ Upscaling factor (default: 4)")
-    parser.add_argument("--overlap", type=int, default=8,
-                        help="🤝 Overlap in LR pixels (default: 8)")
-    parser.add_argument("--eliminate_border_px", type=int, default=0,
-                        help="✂️ Pixels to eliminate at patch borders (default: 0)")
-    parser.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"],
-                        help="⚡ Device for inference (default: cpu)")
-    parser.add_argument("--gpus", type=int, nargs="+", default=[0],
-                        help="💻 GPU IDs to use (default: 0)")
-    parser.add_argument("--debug", action="store_true",
-                        help="🐞 Debug mode: process only ~100 windows")
-
-    args = parser.parse_args()
-    
-if __name__ == "__main__":
-    main()
-    

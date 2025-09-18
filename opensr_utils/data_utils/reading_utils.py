@@ -123,27 +123,38 @@ def create_dirs(self):
 
     self.placeholder_path = str(base)
 
-    os.makedirs(base / "logs", exist_ok=True)
-    os.makedirs(base / "temp", exist_ok=True)
+    # --- Handle logs folder with increment ---
+    log_base = base / "logs"
+    log_dir = log_base
+    counter = 1
+    while log_dir.exists():
+        counter += 1
+        log_dir = base / f"logs_{counter}"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Always use "temp" without increment
+    temp_dir = base / "temp"
+    os.makedirs(temp_dir, exist_ok=True)
 
-    self.log_dir = str(base / "logs")
-    self.temp_folder = str(base / "temp")
+    # Assign attributes
+    self.log_dir = str(log_dir)
+    self.temp_folder = str(temp_dir)
 
-    # create log file
-    self.log_file  = base / "logs" / "log.txt"
+    # Create log file
+    self.log_file = log_dir / "log.txt"
     open(self.log_file, 'a').close()
     self._log(f"🗂️  Logs will be saved to: {self.log_file}")
 
-    # final SR will go directly into base (no sr/ subfolder)
-    self.output_dir = str(base)  
+    # Final SR output goes directly into base
+    self.output_dir = str(base)
 
+    # Placeholder paths
     self.placeholder_filepath = str(base / "sr_placeholder.tif")
-    self.output_file_path     = self.placeholder_filepath
-    
+    self.output_file_path = self.placeholder_filepath
 
+    # Metadata
     self.image_meta["placeholder_dir"] = self.placeholder_path
     self.image_meta["placeholder_filepath"] = self.placeholder_filepath
-
 
 def verify_input_file_type(self, root):
     """
