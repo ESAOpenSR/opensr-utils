@@ -3,7 +3,7 @@
 
 # torch stuff
 import torch
-from pytorch_lightning import LightningModule,Trainer
+from pytorch_lightning import LightningModule
 torch.set_float32_matmul_precision('medium')
 
 # general imports
@@ -121,7 +121,6 @@ class large_file_processing():
                  ):
         
         # 1) Asserts
-        assert os.path.exists(root), "Input folder/file path does not exist"
         assert (model is None) or isinstance(model, (LightningModule, torch.nn.Module)), \
             "Model must be a PyTorch, Lightning, or None."
         assert isinstance(overlap, int) and overlap % 2 == 0, "Overlap must be an even integer."
@@ -159,20 +158,20 @@ class large_file_processing():
 
         # 4) Verify input type FIRST (will also unzip and update self.root if needed)
         from opensr_utils.data_utils.reading_utils import verify_input_file_type
-        verify_input_file_type(self, self.root)
+        verify_input_file_type(self, self.root) # multi-GPU safe
 
         # 5) Create directories AFTER type detection
         from opensr_utils.data_utils.reading_utils import create_dirs
-        create_dirs(self)  # derive base from final self.root/self.input_type
+        create_dirs(self)  # multi-GPU safe
         
         # Get Image information based on input, including image coordinate windows
-        self.get_image_meta(self.root)
+        self.get_image_meta(self.root) # multi-GPU safe
 
         # Create LR placeholder file
-        self.create_placeholder_file()
+        self.create_placeholder_file() # Runs on all Ranks
         
         # Create Datamodule based on input files and Windows
-        self.create_datamodule()
+        self.create_datamodule() # Runs on all Ranks
 
         # Make sure model is useable and in eval mode
         self.model = preprocess_model(self,model,
@@ -304,39 +303,59 @@ class large_file_processing():
                 
         # finally, add image windows to metadata
         self.image_meta["image_windows"] = self.create_image_windows()
-        
-    def create_placeholder_file(self,force=False):
+
+    def create_placeholder_file(self, force: bool = False, wait_timeout_s: float = 600.0, wait_sleep_s: float = 0.2):
         """
         Create an empty HR GeoTIFF placeholder for stitched SR results.
 
         - Output path: `<input_dir>/sr_placeholder.tif`.
-        - Uses ZSTD compression, tiling, and BigTIFF for large file safety.
-        - Applies appropriate transform scaling (factor).
-        - Creates a `temp/` folder alongside placeholder for intermediate patches.
-
-        Skips creation if placeholder already exists.
+        - Only rank 0 creates/writes the file and ensures `temp/` exists.
+        - Other ranks wait until the placeholder is readable, then return.
+        - Safe on CPU and single-GPU (treated as rank 0).
         """
-        
-        # 3. Create placeholder file if it does not exist yet, otherwise skip
-        if os.path.exists(self.output_file_path):
-            self._log(f"⚠️ Placeholder already exists: {self.temp_folder}")
-        
-        # 4. If it does not exist, create it
-        else:
+        import os, time
+        import rasterio
+        from rasterio.transform import Affine
+
+        def _is_rank0_env() -> bool:
+            # Works before torch.distributed is initialized
+            lr = os.environ.get("LOCAL_RANK", "")
+            r  = os.environ.get("RANK", "")
+            ws = os.environ.get("WORLD_SIZE", "1")
+            if ws not in ("", "1"):
+                return (lr in ("", "0")) and (r in ("", "0"))
+            return True  # single process → rank0
+
+        def _placeholder_readable() -> bool:
+            """True if placeholder exists and can be opened by rasterio (not truncated)."""
+            if not os.path.exists(self.placeholder_filepath):
+                return False
+            try:
+                with rasterio.open(self.placeholder_filepath, "r"):
+                    return True
+            except Exception:
+                return False
+
+        is_r0 = _is_rank0_env()
+
+        if is_r0:
+            # Ensure temp dir exists (rank 0 only)
             os.makedirs(self.temp_folder, exist_ok=True)
-            self._log(f"📂 Created temporary folder at: {self.temp_folder}")
-            
-        # If sr_placeholder file exists and force is False, skip creation
-        if os.path.exists(self.placeholder_filepath) and force==False:
-            self._log(f"⚠️ Placeholder file already exists — skipping creation.")
-        else:  # Get file info from meta
+            self._log(f"📂 Ensured temporary folder: {self.temp_folder}")
+
+            # If exists and not forcing, bail early
+            if _placeholder_readable() and not force:
+                self._log("⚠️ Placeholder file already exists — skipping creation.")
+                return
+
+            # Create (or overwrite) placeholder
             nb = int(self.image_meta["bands"])
             W  = int(self.image_meta["width"]  * self.factor)
             H  = int(self.image_meta["height"] * self.factor)
             tr = self.image_meta["transform"]
             save_transform = Affine(tr.a / self.factor, tr.b, tr.c, tr.d, tr.e / self.factor, tr.f)
 
-            profile = {  # robust placeholder for stitching (no compression!)
+            profile = {
                 "driver": "GTiff",
                 "dtype": self.image_meta["dtype"],
                 "count": nb,
@@ -344,19 +363,34 @@ class large_file_processing():
                 "height": H,
                 "crs": self.image_meta["crs"],
                 "transform": save_transform,
-                "compress": "none", # 🔒 Important: keep uncompressed while many writes happen
+                "compress": "none",   # keep uncompressed while many writes happen
                 "tiled": True,
                 "blockxsize": 512,
                 "blockysize": 512,
-                # Huge rasters: don't risk "IF_SAFER" surprises—just use BIGTIFF
                 "bigtiff": "YES",
-                "sparse_ok": True, #  Safe to keep; helps GDAL skip empty tiles
-                "nodata": 0 # Set NoData value to 0
+                "sparse_ok": True,
+                "nodata": 0,
             }
-            # Create the dataset and close without writing any pixels
+
+            # Open with "w" to (re)create atomically from the POV of other ranks
             with rasterio.open(self.output_file_path, "w", **profile):
                 pass
+
             self._log(f"💾 Saved empty placeholder SR image at: {self.output_file_path}")
+
+        else:
+            # Non-rank0: wait until rank0 created a usable file and temp/
+            t0 = time.time()
+            while True:
+                if os.path.isdir(self.temp_folder) and _placeholder_readable():
+                    break
+                if time.time() - t0 > wait_timeout_s:
+                    raise TimeoutError(
+                        f"Timed out waiting for placeholder at {self.placeholder_filepath} "
+                        f"and temp dir {self.temp_folder} created by rank 0."
+                    )
+                time.sleep(wait_sleep_s)
+            # No logging here (avoid concurrent writes); rank 0 logs already.
 
     def create_image_windows(self): # Works
         """
@@ -446,43 +480,52 @@ class large_file_processing():
         - Passes temp folder and window metadata to the model.
         - Uses a PyTorch Lightning Trainer to run `predict_step` in inference mode.
         - Saves SR patches into `temp/` as `.npy`/`.npz`.
-
-        Parameters
-        ----------
-        debug : bool, default=False
-            If True, process only the first 100 windows globally (DDP-safe).
-
-        Notes
-        -----
-        - Multi-GPU support is handled via Lightning DDP.
-        - No checkpoints or logs are created during prediction.
         """
+        import inspect
+        import torch
+        from pytorch_lightning import Trainer
+
         # Pick windows (debug trims to first 100 globally; DDP sampler will shard those across ranks)
         self._log("🚀 Runing SR...")
-
         windows_all = self.image_meta["image_windows"]
         windows_run = windows_all[:100] if debug else windows_all
 
-        # Hand the hook context to the model (these are consumed inside predict_step)
+        # Hand the hook context to the model (consumed inside predict_step)
         self.model._save_temp_folder = self.temp_folder
         self.model._save_windows     = windows_run
         self.model._save_factor      = int(self.factor)
 
+        # Devices: list[int] or 1 for CPU/single-GPU
         devices = self.gpus if self.gpus is not None else 1
-        # Trainer config: no logging/checkpointing; DDP handled automatically if multiple GPUs
-        trainer = Trainer(
-            accelerator=self.device,
-            devices=devices,
+
+        # Build Trainer kwargs robustly across PL versions
+        trainer_kwargs = dict(
+            accelerator=self.device,        # "cpu" or "cuda"
+            devices=devices,                # int or list of GPU ids
             logger=False,
             enable_checkpointing=False,
             enable_model_summary=False,
-            inference_mode=True,           # no_grad + eval
-            # precision="16-mixed",        # uncomment if your model supports AMP
+            inference_mode=True,            # no_grad + eval
+            enable_progress_bar=True,      # optional: cleaner logs
         )
 
-        # Stream predictions to disk inside predict_step (we return None there to avoid gathers)
+        # Use DDP only when we truly have >1 CUDA devices
+        if isinstance(devices, (list, tuple)) and len(devices) > 1 and self.device == "cuda":
+            trainer_kwargs["strategy"] = "ddp"
+
+        # Make sure PL doesn't override our custom sampler
+        sig = inspect.signature(Trainer)
+        if "replace_sampler_ddp" in sig.parameters:          # PL 1.x
+            trainer_kwargs["replace_sampler_ddp"] = False
+        if "use_distributed_sampler" in sig.parameters:      # PL 2.x
+            trainer_kwargs["use_distributed_sampler"] = False
+
+        trainer = Trainer(**trainer_kwargs)
+        self.trainer = trainer  # let _log() and later code see rank via trainer.is_global_zero
+
+        # Stream predictions to disk inside predict_step (we return None there)
         try:
-            trainer.predict(self.model, datamodule=self.datamodule, return_predictions=False)    
+            trainer.predict(self.model, datamodule=self.datamodule, return_predictions=False)
         except RuntimeError as e:
             msg = str(e)
             if "Lightning can't create new processes if CUDA is already initialized" in msg:
@@ -497,7 +540,6 @@ class large_file_processing():
                 )
                 raise SystemExit(3)
             raise  # unrelated error: re-raise
-
 
         # Rank-aware status message
         is_ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -552,20 +594,29 @@ class large_file_processing():
             profile_alpha=6.0,
             gdal_cache_mb=256,
         )
+    
+    def _is_rank0(self, trainer=None):
+        """Return True only for the process that should print (rank 0)."""
+        import os, torch
 
-    def _is_rank0(self,trainer=None):
-        """Return True only on the global rank 0 process."""
-
-        # Prefer Lightning's flag (correct across DDP/TPU/etc.)
+        # When Trainer exists, trust it
         if trainer is not None and hasattr(trainer, "is_global_zero"):
             return bool(trainer.is_global_zero)
-        # Fallback to torch.distributed if initialized
-        try:
-            import torch
-            if torch.distributed.is_available() and torch.distributed.is_initialized():
+
+        # If torch.distributed already initialized, trust it
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            try:
                 return torch.distributed.get_rank() == 0
-        except Exception:
-            pass
+            except Exception:
+                pass
+
+        # Pre-init: rely on env set by the launcher
+        r  = os.environ.get("RANK", "")
+        lr = os.environ.get("LOCAL_RANK", "")
+        ws = os.environ.get("WORLD_SIZE", "")
+        if ws not in ("", "1"):  # multi-process expected
+            return (r in ("", "0")) and (lr in ("", "0"))
+
         # Single process
         return True
 
