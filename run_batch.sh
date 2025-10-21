@@ -3,12 +3,12 @@ set -euo pipefail
 
 # ================== CONFIG ==================
 REPO_ROOT="/data1/simon/GitHub/opensr-utils"   # repo root (for PYTHONPATH if not installed)
-DIR="/data2/simon/mosaic/inference"            # folder with inputs
+DIR="/data2/simon/1msqkm/deep/tiles/"            # folder with inputs
 EXT="zip"                                      # file extension to process
 
 PYTHON="python"                                # interpreter
 DEVICE="cuda"                                  # "cuda" or "cpu"
-GPUS="0,1,2,3"                                 # comma list; ignored on CPU
+GPUS="0,1"                                 # comma list; ignored on CPU
 
 WINDOW_H=128
 WINDOW_W=128

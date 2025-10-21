@@ -6,6 +6,7 @@ This script shows:
   1. How to instantiate an SR model from opensr-model
   2. How to run large-scale inference with opensr-utils
 """
+import torch
 import requests
 from omegaconf import OmegaConf
 from io import StringIO
@@ -21,7 +22,6 @@ import opensr_utils
 
 # Path can be a single .tif, a Sentinel-2 .SAFE folder, or S2GM folder
 path = "/path/to/your/input_data"
-
 sr_object = opensr_utils.large_file_processing(
     root=path,                 # File or Folder path
     model=model,               # your SR model
