@@ -97,9 +97,5 @@ with tqdm(ROOT.rglob("sr.tif"), desc="Processing TIFFs to COGs", unit="file") as
             counter_fail += 1
             print(f"!! Error processing {in_tif}: {e}")
 
-        pbar.set_postfix(success=counter_success, fail=counter_fail)
-        
-        # Stop after 1
-        break
-    
+        pbar.set_postfix(success=counter_success, fail=counter_fail)    
 
