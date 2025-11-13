@@ -8,7 +8,8 @@ from rio_cogeo.cogeo import cog_validate, cog_translate
 from rio_cogeo.profiles import cog_profiles
 
 ROOT = Path("/data2/simon/1msqkm/deep/tiles/done/")
-DEBUG = False # Set to True to enable debug mode (no file writing)
+#ROOT = Path("/data3/1msqkm")
+DEBUG = False  # Set to True to enable debug mode (no file writing)
 REMOVE_ORIGINAL = True # Set to True to delete original files after successful COG creation
 
 COG_PROFILE = cog_profiles.get("deflate").copy()

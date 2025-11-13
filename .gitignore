@@ -4,7 +4,8 @@ trash/
 trash2/
 images_other/
 inference.py
-
+inf_1.py
+inf_2.py
 
 # images
 *.tif
