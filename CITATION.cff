@@ -16,7 +16,8 @@ authors:
 
 repository-code: 'https://github.com/ESAOpenSR/opensr-utils'
 url: 'https://opensr.eu/'
-version: 0.3.0
+version: 1.2.0
+doi: '10.5281/zenodo.17599310'
 date-released: 2025-11-12
 
 keywords:

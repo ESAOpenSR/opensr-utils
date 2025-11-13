@@ -1,17 +1,16 @@
 #### 🚀 Fast multi-GPU super-resolution for Sentinel-2 imagery 🌍 — seamless weighted blending ✨ removes patch artifacts, while flexible input support (.SAFE 📂, S2GM 🛰️, GeoTIFF 🗺️) makes generating high-quality SR products effortless.
 
+[![DOI](https://zenodo.org/badge/716535395.svg)](https://doi.org/10.5281/zenodo.17599309)
+
 ![img1](resources/utils_poster.png)
 
 *Info*   
-- This Repo is currently udnergoing major revision
 - It is functional for RGB+NIR images currently.
 - Functionalities coming in the future:
-	- Input many tiles at once
-	- Pass more file types
-	- Run SR for a selectable amount of bands
+	- [x] Input many tiles at once
+	- [x] Pass more file types
+	- [ ] Run SR for a selectable amount of bands
     
-
-
 # Description  
 This package performs super-resolution with any PyTorch or PyTorch lighning model for the Sentinel-2 10m bands (R-G-B-NIR).  
 
@@ -125,6 +124,22 @@ In order to avoid patching artifacts that are present in many SR products, we pe
 Example of Patching Artifacts in other SR models:  
 ![img5](resources/artifact_example.png)
 
+
+# Citation
+If you use this code in your research, please cite:
+
+```bibtex
+@software{Donike_OpenSR-Utils_2025,
+author = {Donike, Simon and Gomez-Chova, Luis},
+license = {Apache-2.0},
+month = nov,
+title = {{OpenSR-Utils}},
+url = {https://github.com/ESAOpenSR/opensr-utils},
+version = {0.3.0},
+year = {2025},
+doi = {10.5281/zenodo.17599310}
+}
+```
 
 
 #### Stats
