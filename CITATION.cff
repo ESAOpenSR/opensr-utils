@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+title: OpenSR-Utils
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+
+authors:
+  - given-names: Simon
+    family-names: Donike
+    email: accounts@donike.net
+    orcid: 'https://orcid.org/0000-0002-4440-3835'
+  - given-names: Luis
+    family-names: Gomez-Chova
+    orcid: 'https://orcid.org/0000-0003-3924-1269'
+
+repository-code: 'https://github.com/ESAOpenSR/opensr-utils'
+url: 'https://opensr.eu/'
+version: 0.3.0
+date-released: 2025-11-12
+
+keywords:
+  - super-resolution
+  - remote sensing
+  - Earth observation
+  - Sentinel-2
+  - PyTorch
+  - OpenSR
+
+license: Apache-2.0
