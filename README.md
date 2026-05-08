@@ -59,7 +59,7 @@ opensr-run /data/flood_scene.tif LDSRS2   --window_size 128 128   --factor 4   -
 - `root` → Path to the input file or folder (`.tif`, `.SAFE`, or S2GM).  
 - `model` → `LDSRS2` or `None` for the interpolation placeholder.  
 - `--window_size` → Patch size in LR pixels (default: `128 128`).  
-- `--factor` → Upscaling factor (default: `4`).  
+- `--factor` → Positive integer output scale (default: `4`; use `1` for tiled inference without upscaling).  
 - `--overlap` → Overlap in pixels to avoid patch seams (default: `8`).  
 - `--eliminate_border_px` → Pixels cut at patch edges to reduce artifacts.  
 - `--device` → `cpu` or `cuda` (GPU).  
@@ -102,7 +102,7 @@ sr_object = opensr_utils.large_file_processing(
 			root=path,                 # File or Folder path
 			model=model,               # your SR model
 			window_size=(128, 128),    # LR window size for model input
-			factor=4,                  # SR factor (10m → 2.5m)
+			factor=4,                  # SR factor; use 1 for non-SR tiled inference
 			overlap=12,                # overlapping pixels for mosaic stitching
 			eliminate_border_px=2,     # No of discarded border pixels per prediction
 			device=device,             # "cuda" for GPU-accelerated inference

@@ -5,7 +5,7 @@ from datetime import datetime
 import time
 
 
-def can_read_directly_with_rasterio(self,filename):
+def can_read_directly_with_rasterio(self, filename):
     """
     Check whether a given raster file can be opened directly with rasterio.
 
@@ -42,17 +42,28 @@ def can_read_directly_with_rasterio(self,filename):
     """
     # Define a set of supported file extensions
     supported_extensions = {
-        '.tif', '.tiff',  # GeoTIFF
-        '.jpg', '.jpeg',  # JPEG
-        '.jp2', '.j2k', '.jpf', '.jpx', '.jpm', '.mj2',  # JPEG2000
-        '.png',  # PNG
-        '.nc',  # NetCDF
-        '.hdf', '.h4', '.hd4',  # HDF4
-        '.h5', '.hdf5', '.he5',  # HDF5
-        '.img',  # ERDAS IMG and possibly ENVI
-        '.hdr',  # ENVI header (data file extension needs checking)
-        '.dim',  # DIMAP
-        '.vrt',  # VRT
+        ".tif",
+        ".tiff",  # GeoTIFF
+        ".jpg",
+        ".jpeg",  # JPEG
+        ".jp2",
+        ".j2k",
+        ".jpf",
+        ".jpx",
+        ".jpm",
+        ".mj2",  # JPEG2000
+        ".png",  # PNG
+        ".nc",  # NetCDF
+        ".hdf",
+        ".h4",
+        ".hd4",  # HDF4
+        ".h5",
+        ".hdf5",
+        ".he5",  # HDF5
+        ".img",  # ERDAS IMG and possibly ENVI
+        ".hdr",  # ENVI header (data file extension needs checking)
+        ".dim",  # DIMAP
+        ".vrt",  # VRT
     }
 
     # Extract the file extension and check if it's in the set of supported extensions
@@ -74,13 +85,13 @@ def create_dirs(self):
     """
     Create the working directory structure for large-file super-resolution.
 
-    Based on the resolved input type (`file`, `SAFE`, or `S2GM`), this function 
+    Based on the resolved input type (`file`, `SAFE`, or `S2GM`), this function
     determines the appropriate *base directory* and sets up the following:
 
     - `logs/` folder: stores log files and preview outputs.
     - `temp/` folder: stores intermediate SR patches during inference.
     - Final SR outputs (e.g., `sr.tif`) are written directly into the base directory.
-    - `sr_placeholder.tif`: an empty GeoTIFF placeholder created in the base 
+    - `sr_placeholder.tif`: an empty GeoTIFF placeholder created in the base
       directory to receive stitched SR results.
 
     Rules for determining the base directory
@@ -115,9 +126,9 @@ def create_dirs(self):
     def _is_rank0_env() -> bool:
         # Works before torch.distributed init: rely on launcher env vars if present
         lr = os.environ.get("LOCAL_RANK", "")
-        r  = os.environ.get("RANK", "")
+        r = os.environ.get("RANK", "")
         ws = os.environ.get("WORLD_SIZE", "1")
-        if ws not in ("", "1"):   # multi-process likely
+        if ws not in ("", "1"):  # multi-process likely
             # treat rank0 when both LOCAL_RANK and RANK are 0 or empty
             return (lr in ("", "0")) and (r in ("", "0"))
         return True  # single process → rank0
@@ -216,7 +227,9 @@ def create_dirs(self):
         if temp_dir is None:
             raise RuntimeError("Could not locate temp directory created by rank0.")
         if not temp_dir.exists():
-            raise RuntimeError("Temp directory does not exist yet; rank0 mkdir likely failed.")
+            raise RuntimeError(
+                "Temp directory does not exist yet; rank0 mkdir likely failed."
+            )
 
         # Assign attributes (NO file writes here)
         self.log_dir = str(log_dir_path)
@@ -235,6 +248,7 @@ def create_dirs(self):
     self.image_meta["placeholder_filepath"] = self.placeholder_filepath
     self.image_meta["final_sr_path"] = self.final_sr_path
 
+
 def verify_input_file_type(self, root):
     """
     Resolve the input type before any dirs/logging are created:
@@ -252,7 +266,7 @@ def verify_input_file_type(self, root):
 
     def _is_rank0_env() -> bool:
         lr = os.environ.get("LOCAL_RANK", "")
-        r  = os.environ.get("RANK", "")
+        r = os.environ.get("RANK", "")
         ws = os.environ.get("WORLD_SIZE", "1")
         if ws not in ("", "1"):
             return (lr in ("", "0")) and (r in ("", "0"))
@@ -261,6 +275,7 @@ def verify_input_file_type(self, root):
     def _can_read_with_rasterio(self, path: str) -> bool:
         try:
             import rasterio
+
             with rasterio.open(path):
                 return True
         except Exception:
@@ -273,7 +288,9 @@ def verify_input_file_type(self, root):
             try:
                 member_path.relative_to(dest)
             except ValueError as exc:
-                raise RuntimeError(f"Unsafe path in zip archive: {member.filename}") from exc
+                raise RuntimeError(
+                    f"Unsafe path in zip archive: {member.filename}"
+                ) from exc
         zf.extractall(destination)
 
     self.root = str(root)
@@ -281,8 +298,8 @@ def verify_input_file_type(self, root):
 
     # ---------------- ZIP-like case (works even if .zip already deleted) ----------------
     if str(p).lower().endswith(".zip"):
-        extract_dir = p.parent / p.stem         # .../<zip_stem>/
-        sentinel    = extract_dir / ".unzipped_ok"
+        extract_dir = p.parent / p.stem  # .../<zip_stem>/
+        sentinel = extract_dir / ".unzipped_ok"
 
         def _find_safe():
             # search nested (zip may contain a top-level folder before the .SAFE)

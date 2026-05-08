@@ -12,11 +12,13 @@ def _cog_profile():
     from rio_cogeo.profiles import cog_profiles
 
     profile = cog_profiles.get("deflate").copy()
-    profile.update({
-        "blocksize": 512,
-        "compress": "deflate",
-        "bigtiff": "IF_SAFER",
-    })
+    profile.update(
+        {
+            "blocksize": 512,
+            "compress": "deflate",
+            "bigtiff": "IF_SAFER",
+        }
+    )
     return profile
 
 
@@ -81,7 +83,9 @@ def process_tree(root: Path, remove_original: bool = False, dry_run: bool = Fals
     counter_success = 0
     counter_fail = 0
 
-    with tqdm(root.rglob("sr.tif"), desc="Processing TIFFs to COGs", unit="file") as pbar:
+    with tqdm(
+        root.rglob("sr.tif"), desc="Processing TIFFs to COGs", unit="file"
+    ) as pbar:
         for in_tif in pbar:
             out_tif = in_tif.with_name(in_tif.stem + "_cog.tif")
 
@@ -115,13 +119,25 @@ def process_tree(root: Path, remove_original: bool = False, dry_run: bool = Fals
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert sr.tif outputs below a directory to COGs.")
+    parser = argparse.ArgumentParser(
+        description="Convert sr.tif outputs below a directory to COGs."
+    )
     parser.add_argument("root", type=Path, help="Root directory to search recursively")
-    parser.add_argument("--remove_original", action="store_true", help="Delete sr.tif after a validated COG is written")
-    parser.add_argument("--dry_run", action="store_true", help="Print planned work without writing files")
+    parser.add_argument(
+        "--remove_original",
+        action="store_true",
+        help="Delete sr.tif after a validated COG is written",
+    )
+    parser.add_argument(
+        "--dry_run",
+        action="store_true",
+        help="Print planned work without writing files",
+    )
     args = parser.parse_args()
 
-    ok, fail = process_tree(args.root, remove_original=args.remove_original, dry_run=args.dry_run)
+    ok, fail = process_tree(
+        args.root, remove_original=args.remove_original, dry_run=args.dry_run
+    )
     print(f"Summary: OK={ok} FAIL={fail}")
 
 

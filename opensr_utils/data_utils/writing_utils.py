@@ -6,6 +6,7 @@ import rasterio
 from rasterio.windows import Window
 from tqdm import tqdm
 
+
 # -----------------------------
 # Blending a single patch (yours, now supports an optional open handle)
 # -----------------------------
@@ -18,9 +19,9 @@ def write_to_placeholder(
     overlap=8,
     eliminate_border_px=0,
     *,
-    profile: str = "linear",    # "linear" | "sigmoid" | "cosine"
-    profile_alpha: float = 6.0, # steepness for sigmoid
-    dst=None                    # <-- NEW: optionally pass an already-open rasterio dataset in "r+" mode
+    profile: str = "linear",  # "linear" | "sigmoid" | "cosine"
+    profile_alpha: float = 6.0,  # steepness for sigmoid
+    dst=None,  # <-- NEW: optionally pass an already-open rasterio dataset in "r+" mode
 ):
     """
     Blend a single super-resolved (SR) patch into a placeholder GeoTIFF.
@@ -93,6 +94,7 @@ def write_to_placeholder(
     ...     dst=open_dataset  # re-use handle inside a loop
     ... )
     """
+
     # -------------------------
     # Helpers for ramps
     # -------------------------
@@ -109,17 +111,28 @@ def write_to_placeholder(
         elif curve == "cosine":
             r = 0.5 * (1.0 - np.cos(np.pi * t))
         else:
-            raise ValueError(f"Unknown profile '{curve}' (use 'linear'|'sigmoid'|'cosine').")
+            raise ValueError(
+                f"Unknown profile '{curve}' (use 'linear'|'sigmoid'|'cosine')."
+            )
         return r.astype(np.float32)
 
-    def apply_edge_ramp(vec: np.ndarray, side: str, overlap_px: int, cut_px: int, curve: str, alpha: float):
+    def apply_edge_ramp(
+        vec: np.ndarray,
+        side: str,
+        overlap_px: int,
+        cut_px: int,
+        curve: str,
+        alpha: float,
+    ):
         ramp_len = max(0, overlap_px - cut_px)
         if side in ("left", "top"):
             if cut_px > 0:
                 vec[:cut_px] = 0.0
             if ramp_len > 0:
                 r = make_ramp(ramp_len, curve, alpha)  # 0→1
-                vec[cut_px:cut_px + ramp_len] = np.minimum(vec[cut_px:cut_px + ramp_len], r)
+                vec[cut_px : cut_px + ramp_len] = np.minimum(
+                    vec[cut_px : cut_px + ramp_len], r
+                )
         else:  # right/bottom
             if cut_px > 0:
                 vec[-cut_px:] = 0.0
@@ -140,12 +153,14 @@ def write_to_placeholder(
             x = x.detach().cpu().float().numpy()
         try:
             import xarray as xr
+
             if hasattr(xr, "DataArray") and isinstance(x, xr.DataArray):
                 x = x.values
         except Exception:
             pass
         try:
             from PIL import Image
+
             if isinstance(x, Image.Image):
                 x = np.array(x)
         except Exception:
@@ -218,35 +233,39 @@ def write_to_placeholder(
         valid = valid.astype(np.float32)
 
         # dataset borders
-        touch_left   = (hr_win.col_off == 0)
-        touch_right  = (hr_win.col_off + hr_win.width  == dst.width)
-        touch_top    = (hr_win.row_off == 0)
-        touch_bottom = (hr_win.row_off + hr_win.height == dst.height)
+        touch_left = hr_win.col_off == 0
+        touch_right = hr_win.col_off + hr_win.width == dst.width
+        touch_top = hr_win.row_off == 0
+        touch_bottom = hr_win.row_off + hr_win.height == dst.height
 
         # detect overlap over a thin band
         if overlap > 0:
             b = max(1, min(overlap, max(1, W // 4), max(1, H // 4)))
         else:
             b = 1
-        left_valid   = valid[:, :b].any()
-        right_valid  = valid[:, -b:].any()
-        top_valid    = valid[:b, :].any()
+        left_valid = valid[:, :b].any()
+        right_valid = valid[:, -b:].any()
+        top_valid = valid[:b, :].any()
         bottom_valid = valid[-b:, :].any()
 
         # 1D weights
         u = np.ones(W, dtype=np.float32)
         v = np.ones(H, dtype=np.float32)
-        if left_valid   and not touch_left:   apply_edge_ramp(u, "left",  overlap, elim, profile, profile_alpha)
-        if right_valid  and not touch_right:  apply_edge_ramp(u, "right", overlap, elim, profile, profile_alpha)
-        if top_valid    and not touch_top:    apply_edge_ramp(v, "top",   overlap, elim, profile, profile_alpha)
-        if bottom_valid and not touch_bottom: apply_edge_ramp(v, "bottom",overlap, elim, profile, profile_alpha)
+        if left_valid and not touch_left:
+            apply_edge_ramp(u, "left", overlap, elim, profile, profile_alpha)
+        if right_valid and not touch_right:
+            apply_edge_ramp(u, "right", overlap, elim, profile, profile_alpha)
+        if top_valid and not touch_top:
+            apply_edge_ramp(v, "top", overlap, elim, profile, profile_alpha)
+        if bottom_valid and not touch_bottom:
+            apply_edge_ramp(v, "bottom", overlap, elim, profile, profile_alpha)
 
         # 2D weights & blend
         w_sr_2d = (v[:, None] * u[None, :]).astype(np.float32)
         w_ph_2d = (1.0 - w_sr_2d) * valid
-        out = (w_sr_2d[None, ...] * sr + w_ph_2d[None, ...] * ph)
+        out = w_sr_2d[None, ...] * sr + w_ph_2d[None, ...] * ph
 
-        target_dtype = np.dtype(image_meta["dtype"])
+        target_dtype = np.dtype(dst.dtypes[0])
         if np.issubdtype(target_dtype, np.integer):
             info = np.iinfo(target_dtype)
             out = np.clip(out, info.min, info.max)
@@ -271,7 +290,7 @@ def stitch_sr_patches(
     cleanup_every=50,
     profile="linear",
     profile_alpha=6.0,
-    gdal_cache_mb=256
+    gdal_cache_mb=256,
 ):
     """
     Distributed-safe wrapper for stitching SR patches into a placeholder GeoTIFF.
@@ -334,18 +353,18 @@ def stitch_sr_patches(
     entries = idx["entries"]
     entries.sort(key=lambda e: (e["row_off_lr"], e["col_off_lr"]))
     if limit is not None:
-        entries = entries[:int(limit)]
+        entries = entries[: int(limit)]
 
     # 2) build meta from self
     image_meta = {
         "placeholder_path": self.placeholder_filepath,
-        "dtype": str(self.image_meta["dtype"]),
+        "dtype": str(idx.get("saved_dtype") or self.image_meta["dtype"]),
         "window_coordinates": [
             Window(e["col_off_lr"], e["row_off_lr"], e["width_lr"], e["height_lr"])
             for e in entries
         ],
     }
-    factor = int(self.factor)
+    factor = int(idx.get("factor", self.factor))
     # Public overlap/eliminate_border_px are specified in LR pixels. Blending
     # happens on SR patches, so convert both to HR pixels.
     overlap = int(self.overlap) * factor
@@ -353,6 +372,11 @@ def stitch_sr_patches(
 
     container = idx.get("saved_container", "npz")
     key = idx.get("saved_key", "arr")
+    expected_bands = idx.get("output_bands")
+    if not expected_bands:
+        entry_bands = {int(e["bands"]) for e in entries if e.get("bands")}
+        if len(entry_bands) == 1:
+            expected_bands = entry_bands.pop()
 
     to_delete = []
     missing_count = 0
@@ -360,7 +384,14 @@ def stitch_sr_patches(
     # 3) GDAL environment + single open
     with rasterio.Env(GDAL_CACHEMAX=gdal_cache_mb, NUM_THREADS="1"):
         with rasterio.open(image_meta["placeholder_path"], "r+") as dst:
-            for i, e in enumerate(tqdm(entries, desc="Stitching → placeholder", unit="tile"), start=1):
+            if expected_bands and dst.count != int(expected_bands):
+                raise ValueError(
+                    f"Placeholder has {dst.count} bands, but predictions have "
+                    f"{int(expected_bands)} bands."
+                )
+            for i, e in enumerate(
+                tqdm(entries, desc="Stitching → placeholder", unit="tile"), start=1
+            ):
                 p = e["path"]
                 try:
                     if container == "npz" and p.endswith(".npz"):
@@ -370,13 +401,16 @@ def stitch_sr_patches(
                         sr = np.load(p)
 
                     write_to_placeholder(
-                        self, sr, i-1, image_meta,
+                        self,
+                        sr,
+                        i - 1,
+                        image_meta,
                         factor=factor,
                         overlap=overlap,
                         eliminate_border_px=eliminate_border_px,
                         profile=profile,
                         profile_alpha=profile_alpha,
-                        dst=dst  # <-- reuse open dataset
+                        dst=dst,  # <-- reuse open dataset
                     )
                     to_delete.append(p)
                 except FileNotFoundError:
@@ -397,10 +431,14 @@ def stitch_sr_patches(
                     to_delete.clear()
 
     if missing_count:
-        raise RuntimeError(f"{missing_count} patch files were missing and could not be stitched.")
+        raise RuntimeError(
+            f"{missing_count} patch files were missing and could not be stitched."
+        )
 
     # 4) rename placeholder -> final
-    sr_path = getattr(self, "final_sr_path", None) or image_meta["placeholder_path"].replace("sr_placeholder.tif", "sr.tif")
+    sr_path = getattr(self, "final_sr_path", None) or image_meta[
+        "placeholder_path"
+    ].replace("sr_placeholder.tif", "sr.tif")
     os.replace(image_meta["placeholder_path"], sr_path)
     self.final_sr_path = sr_path
 
@@ -420,7 +458,7 @@ def ddp_safe_stitch(
     cleanup_every=50,
     profile="linear",
     profile_alpha=6.0,
-    gdal_cache_mb=256
+    gdal_cache_mb=256,
 ):
     """
     Distributed-safe wrapper for stitching SR patches into a GeoTIFF.
@@ -488,23 +526,29 @@ def ddp_safe_stitch(
             return bool(trainer.is_global_zero)
         try:
             import torch
+
             if torch.distributed.is_available() and torch.distributed.is_initialized():
                 return torch.distributed.get_rank() == 0
         except Exception:
             pass
         return True
+
     is_rank0 = _is_rank0_local()
 
     out = None
     if is_rank0:
         placeholder = self.placeholder_filepath
-        sr_path = getattr(self, "final_sr_path", None) or placeholder.replace("sr_placeholder.tif", "sr.tif")
+        sr_path = getattr(self, "final_sr_path", None) or placeholder.replace(
+            "sr_placeholder.tif", "sr.tif"
+        )
         self.final_sr_path = sr_path
 
         # --- overwrite logic ---
         if os.path.exists(sr_path):
             if not getattr(self, "overwrite", False):
-                raise FileExistsError(f"Output already exists at {sr_path}. Pass overwrite=True to replace it.")
+                raise FileExistsError(
+                    f"Output already exists at {sr_path}. Pass overwrite=True to replace it."
+                )
             self._log(f"⚠️ Existing output found at {sr_path} — will be overwritten.")
             os.remove(sr_path)
 

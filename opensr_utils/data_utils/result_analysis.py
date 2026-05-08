@@ -9,10 +9,17 @@ from typing import Tuple
 
 def stretch(arr: np.ndarray) -> np.ndarray:
     """Apply normalization and return RGB image (H, W, 3)"""
+    if arr.ndim == 2:
+        arr = arr[None, ...]
     if arr.max() > 256:
         arr = arr / 10000.0  # assuming input is in [0, 10000]
-    rgb = arr[:3]
-    rgb = rgb*3.5
+    if arr.shape[0] >= 3:
+        rgb = arr[:3]
+    elif arr.shape[0] == 2:
+        rgb = np.concatenate([arr, arr[:1]], axis=0)
+    else:
+        rgb = np.repeat(arr[:1], 3, axis=0)
+    rgb = rgb * 3.5
     rgb = rgb.clip(0, 1)
     return np.clip(rgb.transpose(1, 2, 0), 0, 1)
 
@@ -26,7 +33,7 @@ def generate_side_by_side_previews(
     crop_size: int = 512,
     target_size: Tuple[int, int] = (512, 512),
 ):
-    """Generate side-by-side PNG previews of random windows from a 4-band GeoTIFF."""
+    """Generate side-by-side PNG previews from a GeoTIFF with any band count."""
     os.makedirs(out_dir, exist_ok=True)
 
     with rasterio.open(tif_path) as src:
@@ -34,25 +41,37 @@ def generate_side_by_side_previews(
 
         for i in range(num_examples):
             if W >= window_size and H >= window_size:
-                x_off = np.random.randint(0, W - window_size)
-                y_off = np.random.randint(0, H - window_size)
+                x_off = np.random.randint(0, W - window_size + 1)
+                y_off = np.random.randint(0, H - window_size + 1)
                 win = Window(x_off, y_off, window_size, window_size)
                 arr = src.read(window=win)
             else:
                 arr = src.read()
-                self._log(f"⚠️ Image too small for window, using full image for sample {i}")
+                self._log(
+                    f"⚠️ Image too small for window, using full image for sample {i}"
+                )
 
-            resized = resize(arr, (4, *target_size), order=1, preserve_range=True, anti_aliasing=True)
+            resized = resize(
+                arr,
+                (arr.shape[0], *target_size),
+                order=1,
+                preserve_range=True,
+                anti_aliasing=True,
+            )
 
             h, w = arr.shape[1:]
             crop_h, crop_w = min(crop_size, h), min(crop_size, w)
             start_y = (h - crop_h) // 2
             start_x = (w - crop_w) // 2
-            crop = arr[:, start_y:start_y+crop_h, start_x:start_x+crop_w]
+            crop = arr[:, start_y : start_y + crop_h, start_x : start_x + crop_w]
 
             if crop.shape[1:] != target_size:
-                pad = ((0, 0), (0, target_size[0] - crop.shape[1]), (0, target_size[1] - crop.shape[2]))
-                crop = np.pad(crop, pad, mode='edge')
+                pad = (
+                    (0, 0),
+                    (0, target_size[0] - crop.shape[1]),
+                    (0, target_size[1] - crop.shape[2]),
+                )
+                crop = np.pad(crop, pad, mode="edge")
 
             left_img = stretch(resized)
             right_img = stretch(crop)
@@ -63,7 +82,7 @@ def generate_side_by_side_previews(
             axes[1].imshow(right_img)
             axes[1].set_title("Center Native Crop")
             for ax in axes:
-                ax.axis('off')
+                ax.axis("off")
 
             out_path = os.path.join(out_dir, f"example_{i:03d}.png")
             plt.tight_layout()
@@ -92,13 +111,12 @@ def crop_and_save_georeferenced_excerpt(
     """
     with rasterio.open(tif_path) as src:
         full_width, full_height = src.width, src.height
-        patch_width, patch_height = random_crop_size
+        requested_width, requested_height = random_crop_size
+        patch_width = min(requested_width, full_width)
+        patch_height = min(requested_height, full_height)
 
-        # ✅ Ensure random window fits in image
         max_x = full_width - patch_width
         max_y = full_height - patch_height
-        if max_x < 0 or max_y < 0:
-            raise ValueError("Patch size larger than input image")
 
         # 🎲 Random top-left of patch
         x_off = np.random.randint(0, max_x + 1)
@@ -109,29 +127,30 @@ def crop_and_save_georeferenced_excerpt(
 
         # 📥 Read and save cropped window
         meta = src.meta.copy()
-        meta.update({
-            "height": patch_height,
-            "width": patch_width,
-            "transform": transform
-        })
+        meta.update(
+            {"height": patch_height, "width": patch_width, "transform": transform}
+        )
 
         data = src.read(window=win)
-        with rasterio.open(out_tif, 'w', **meta) as dst:
+        with rasterio.open(out_tif, "w", **meta) as dst:
             dst.write(data)
 
     # ✂️ Extract random crop from saved patch
     C, H, W = data.shape
-    crop_h, crop_w = random_crop_size
-    if H < crop_h or W < crop_w:
-        raise ValueError("Saved patch is too small for requested crop size")
+    crop_w = min(random_crop_size[0], W)
+    crop_h = min(random_crop_size[1], H)
 
     top = np.random.randint(0, H - crop_h + 1)
     left = np.random.randint(0, W - crop_w + 1)
-    crop = data[:, top:top+crop_h, left:left+crop_w]
+    crop = data[:, top : top + crop_h, left : left + crop_w]
 
-    self._log(f"✅ Saved georeferenced example SR patch of size {crop.shape} to {out_tif}")
+    self._log(
+        f"✅ Saved georeferenced example SR patch of size {crop.shape} to {out_tif}"
+    )
     return crop
 
 
 if __name__ == "__main__":
-    raise SystemExit("Import this module and call its preview helpers from a pipeline run.")
+    raise SystemExit(
+        "Import this module and call its preview helpers from a pipeline run."
+    )

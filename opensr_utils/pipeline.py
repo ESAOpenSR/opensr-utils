@@ -4,30 +4,31 @@
 # torch stuff
 import torch
 from pytorch_lightning import LightningModule
-torch.set_float32_matmul_precision('medium')
+
+torch.set_float32_matmul_precision("medium")
 
 # general imports
 import os
 import shutil
+import json
 from datetime import datetime
 
 # Geo
 import rasterio
 from rasterio.transform import Affine
 
-
 # local imports
 from opensr_utils.data_utils.datamodule import PredictionDataModule
 from opensr_utils.model_utils.prepare_model import preprocess_model
 
 
-class large_file_processing():
+class large_file_processing:
     """
     Large-scale super-resolution pipeline for Sentinel-2 and other geospatial inputs.
 
     This class orchestrates the full workflow for processing large raster datasets
-    (e.g. Sentinel-2 SAFE archives, S2GM folders, or standalone GeoTIFFs) with a 
-    super-resolution (SR) model. It handles input validation, directory setup, 
+    (e.g. Sentinel-2 SAFE archives, S2GM folders, or standalone GeoTIFFs) with a
+    super-resolution (SR) model. It handles input validation, directory setup,
     patch-based inference, distributed (DDP) support, and final stitched outputs.
 
     Workflow
@@ -41,16 +42,17 @@ class large_file_processing():
         - Sets up `logs/`, `temp/` next to the input for intermediate files.
     4. **Extract image metadata**
         - Reads size, CRS, transforms, and computes sliding-window coordinates.
-    5. **Create placeholder file**
-        - Writes an empty GeoTIFF (`sr_placeholder.tif`) to receive SR results.
+    5. **Prepare dynamic output metadata**
+        - Defers placeholder creation until prediction metadata is available.
     6. **Initialize datamodule**
         - Builds a PyTorch Lightning DataModule for batched inference windows.
     7. **Preprocess model**
         - Places model on correct device, switches to eval mode, prepares for inference.
     8. **Run super-resolution**
         - If not in debug mode, runs patch-based inference and saves results in `temp/`.
-    9. **Stitch patches into final output**
-        - On rank 0 only: stitches patches into the placeholder file → `final_sr_path`.
+    9. **Create placeholder and stitch patches into final output**
+        - On rank 0 only: creates a placeholder matching the actual prediction
+          factor/band count, then stitches patches into `final_sr_path`.
         10. **Cleanup and previews**
         - Deletes temporary LR patches.
         - Optionally saves example crops and preview images in `logs/`.
@@ -64,12 +66,13 @@ class large_file_processing():
     window_size : tuple[int, int], default=(128, 128)
         Spatial size of low-resolution windows (before SR).
     factor : int, default=4
-        Super-resolution upscaling factor. Must be one of {2, 4, 6, 8}.
+        Super-resolution upscaling factor. Any positive integer is accepted;
+        use ``1`` for tiled inference with models that preserve resolution.
     overlap : int, default=8
         Overlap (in LR pixels) between adjacent windows. Must be even.
     eliminate_border_px : int, default=0
         Number of border pixels to discard per window in the SR output.
-        Must be even and smaller than `overlap`.
+        Must be even; if overlap is non-zero, must be smaller than `overlap`.
     device : {"cpu","cuda"}, default="cpu"
         Device on which to run the model.
     gpus : int | list[int] | None, default=1
@@ -107,45 +110,62 @@ class large_file_processing():
     - On rank 0, the stitched result is written to disk and previews are saved.
     - Non-rank0 processes perform inference only, without logging or stitching.
     """
-    def __init__(self,
-                 root: str,
-                 model=None,
-                 window_size: tuple = (128, 128),
-                 factor: int = 4,
-                 overlap: int = 8,
-                 eliminate_border_px=0,
-                 device: str = "cpu",
-                 gpus=None,
-                 save_preview: bool = False,
-                 debug=False,
-                 auto_run: bool = False,
-                 cleanup: bool = True,
-                 overwrite: bool = False,
-                 delete_input_zip: bool = False,
-                 batch_size: int = 16,
-                 num_workers: int = 4,
-                 prefetch_factor: int = 2,
-                 compressed_patches: bool = False,
-                 ):
+
+    def __init__(
+        self,
+        root: str,
+        model=None,
+        window_size: tuple = (128, 128),
+        factor: int = 4,
+        overlap: int = 8,
+        eliminate_border_px=0,
+        device: str = "cpu",
+        gpus=None,
+        save_preview: bool = False,
+        debug=False,
+        auto_run: bool = False,
+        cleanup: bool = True,
+        overwrite: bool = False,
+        delete_input_zip: bool = False,
+        batch_size: int = 16,
+        num_workers: int = 4,
+        prefetch_factor: int = 2,
+        compressed_patches: bool = False,
+    ):
         # 1) Validate public inputs. Do not use assert: optimized Python removes it.
-        if model is not None and not isinstance(model, (LightningModule, torch.nn.Module)):
+        if model is not None and not isinstance(
+            model, (LightningModule, torch.nn.Module)
+        ):
             raise TypeError("Model must be a PyTorch module, LightningModule, or None.")
         if not isinstance(window_size, (tuple, list)) or len(window_size) != 2:
-            raise TypeError("window_size must be a tuple/list of two positive integers.")
+            raise TypeError(
+                "window_size must be a tuple/list of two positive integers."
+            )
         if not all(isinstance(v, int) and v > 0 for v in window_size):
             raise ValueError("window_size must contain two positive integers.")
         if not isinstance(overlap, int) or overlap < 0 or overlap % 2 != 0:
             raise ValueError("overlap must be a non-negative even integer.")
-        if not isinstance(eliminate_border_px, int) or eliminate_border_px < 0 or eliminate_border_px % 2 != 0:
+        if (
+            not isinstance(eliminate_border_px, int)
+            or eliminate_border_px < 0
+            or eliminate_border_px % 2 != 0
+        ):
             raise ValueError("eliminate_border_px must be a non-negative even integer.")
-        if eliminate_border_px >= overlap:
+        if overlap == 0:
+            if eliminate_border_px != 0:
+                raise ValueError(
+                    "eliminate_border_px must be 0 when overlap is 0."
+                )
+        elif eliminate_border_px >= overlap:
             raise ValueError("eliminate_border_px must be smaller than overlap.")
-        if (overlap - eliminate_border_px) < 4:
-            raise ValueError("overlap must be at least 4 px bigger than eliminate_border_px.")
+        if overlap > 0 and (overlap - eliminate_border_px) < 4:
+            raise ValueError(
+                "overlap must be at least 4 px bigger than eliminate_border_px."
+            )
         if overlap >= min(window_size):
             raise ValueError("overlap must be smaller than both window dimensions.")
-        if factor not in [2, 4, 6, 8]:
-            raise ValueError("Factor must be one of [2,4,6,8].")
+        if not isinstance(factor, int) or isinstance(factor, bool) or factor <= 0:
+            raise ValueError("factor must be a positive integer.")
         if device not in ("cpu", "cuda"):
             raise ValueError("device must be 'cpu' or 'cuda'.")
         for name, value in {
@@ -158,15 +178,16 @@ class large_file_processing():
         if batch_size == 0:
             raise ValueError("batch_size must be greater than zero.")
 
-
         # General Settings
-        self.debug = bool(debug) # if True, only process 100 windows globally (DDP-safe)
-        self.root = root # path to folder containing S2 SAFE data format
-        self.window_size = tuple(window_size) # window size of the LR image
-        self.factor = factor # sr factor of the model
-        self.overlap = overlap # overlap in px of the LR image windows
-        self.eliminate_border_px = eliminate_border_px # border pixels to eliminate in px on each side of the SR image
-        self.device = device # device to run model on
+        self.debug = bool(
+            debug
+        )  # if True, only process 100 windows globally (DDP-safe)
+        self.root = root  # path to folder containing S2 SAFE data format
+        self.window_size = tuple(window_size)  # window size of the LR image
+        self.factor = int(factor)  # sr factor of the model
+        self.overlap = overlap  # overlap in px of the LR image windows
+        self.eliminate_border_px = eliminate_border_px  # border pixels to eliminate in px on each side of the SR image
+        self.device = device  # device to run model on
         self.save_preview = bool(save_preview)
         self.cleanup = bool(cleanup)
         self.overwrite = bool(overwrite)
@@ -186,21 +207,23 @@ class large_file_processing():
         else:
             self.run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{os.getpid()}"
             os.environ["OPENSR_RUN_ID"] = self.run_id
-        if isinstance(gpus, int): # pass GPU/s to Trainer as list
-            self.gpus = [gpus] # number of gpus or list of gpu ids to use
+        if isinstance(gpus, int):  # pass GPU/s to Trainer as list
+            self.gpus = [gpus]  # number of gpus or list of gpu ids to use
         elif gpus is None:
             self.gpus = None
         elif isinstance(gpus, (list, tuple)):
             self.gpus = list(gpus)
         else:
             raise TypeError("gpus must be None, an int, or a list/tuple of ints.")
-        if self.gpus is not None and not all(isinstance(g, int) and g >= 0 for g in self.gpus):
+        if self.gpus is not None and not all(
+            isinstance(g, int) and g >= 0 for g in self.gpus
+        ):
             raise ValueError("gpus must contain non-negative integer GPU ids.")
         if self.device == "cpu":
             self.gpus = None
         elif self.gpus is None:
             self.gpus = [0]
-            
+
         # 3) Locals/init-only (no paths derived yet!) - leave empty
         self.image_meta = {}
         self.input_type = None
@@ -212,23 +235,28 @@ class large_file_processing():
 
         # 4) Verify input type FIRST (will also unzip and update self.root if needed)
         from opensr_utils.data_utils.reading_utils import verify_input_file_type
-        verify_input_file_type(self, self.root) # multi-GPU safe
+
+        verify_input_file_type(self, self.root)  # multi-GPU safe
 
         # 5) Create directories AFTER type detection
         from opensr_utils.data_utils.reading_utils import create_dirs
+
         create_dirs(self)  # multi-GPU safe
-        
+
         # Get Image information based on input, including image coordinate windows
-        self.get_image_meta(self.root) # multi-GPU safe
-        
+        self.get_image_meta(self.root)  # multi-GPU safe
+
         # Create Datamodule based on input files and Windows
-        self.create_datamodule() # Runs on all Ranks
+        self.create_datamodule()  # Runs on all Ranks
 
         # Make sure model is useable and in eval mode
-        self.model = preprocess_model(self,model,
-                                      temp_folder=self.temp_folder,
-                                      windows=self.image_meta["image_windows"],
-                                      factor=self.factor)
+        self.model = preprocess_model(
+            self,
+            model,
+            temp_folder=self.temp_folder,
+            windows=self.image_meta["image_windows"],
+            factor=self.factor,
+        )
 
         # Print Status
         self._log("📊 Status: Model and Data ready for inference ✅")
@@ -243,13 +271,15 @@ class large_file_processing():
         The datamodule wraps the input type, root path, and sliding windows,
         and handles batching for PyTorch Lightning’s predict loop.
         """
-        dm = PredictionDataModule(input_type=self.input_type,
-                              root=self.root,
-                              windows=windows or self.image_meta["image_windows"],
-                              lr_file_dict=self.image_meta["lr_file_dict"],
-                              prefetch_factor=self.prefetch_factor,
-                              batch_size=self.batch_size,
-                              num_workers=self.num_workers)
+        dm = PredictionDataModule(
+            input_type=self.input_type,
+            root=self.root,
+            windows=windows or self.image_meta["image_windows"],
+            lr_file_dict=self.image_meta["lr_file_dict"],
+            prefetch_factor=self.prefetch_factor,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+        )
         dm.setup()
         self._log(f"📦 Created PredictionDataModule with {len(dm.dataset)} patches.")
         self.datamodule = dm
@@ -267,7 +297,11 @@ class large_file_processing():
         if self.input_type == "file":
             self.image_meta["lr_file_dict"] = {"file": root_dir}
             with rasterio.open(root_dir) as src:
-                self.image_meta["width"], self.image_meta["height"], self.image_meta["dtype"] = src.width, src.height, src.dtypes[0]
+                (
+                    self.image_meta["width"],
+                    self.image_meta["height"],
+                    self.image_meta["dtype"],
+                ) = (src.width, src.height, src.dtypes[0])
                 self.image_meta["transform"] = src.transform
                 self.image_meta["crs"] = src.crs
                 self.image_meta["bands"] = src.count
@@ -278,30 +312,73 @@ class large_file_processing():
             for root, _, files in os.walk(self.root):
                 if "IMG_DATA" in root:
                     for f in files:
-                        if f.endswith(".jp2") and any(f"_{b}_" in f or f"_{b}." in f for b in ("B02", "B03", "B04", "B08")):
+                        if f.endswith(".jp2"):
                             jp2s.append(os.path.join(root, f))
             jp2s = sorted(jp2s)  # Sort to maintain consistent band order
+            if not jp2s:
+                raise FileNotFoundError(
+                    f"No JP2 bands found in SAFE folder {self.root}."
+                )
 
             def pick_safe_band(band):
-                matches = [p for p in jp2s if f"_{band}_" in os.path.basename(p) or f"_{band}." in os.path.basename(p)]
+                matches = [
+                    p
+                    for p in jp2s
+                    if f"_{band}_" in os.path.basename(p)
+                    or f"_{band}." in os.path.basename(p)
+                ]
                 if not matches:
                     raise FileNotFoundError(f"Could not locate SAFE band {band}.")
                 ten_meter = [p for p in matches if "_10m" in os.path.basename(p)]
                 return sorted(ten_meter or matches)[0]
 
-            self.image_meta["lr_file_dict"] = {
-                "R": pick_safe_band("B04"),
-                "G": pick_safe_band("B03"),
-                "B": pick_safe_band("B02"),
-                "NIR": pick_safe_band("B08"),
-            }
+            def safe_band_name(path):
+                basename = os.path.basename(path)
+                for part in basename.replace(".", "_").split("_"):
+                    if part.startswith("B") and part[1:].isalnum():
+                        return part
+                return os.path.splitext(basename)[0]
+
+            lr_file_dict = {}
+            for label, band_name in (
+                ("R", "B04"),
+                ("G", "B03"),
+                ("B", "B02"),
+                ("NIR", "B08"),
+            ):
+                try:
+                    lr_file_dict[label] = pick_safe_band(band_name)
+                except FileNotFoundError:
+                    pass
+            used = set(lr_file_dict.values())
+            for path in jp2s:
+                if path not in used:
+                    lr_file_dict[safe_band_name(path)] = path
+            if not lr_file_dict:
+                raise FileNotFoundError(f"No usable SAFE bands found in {self.root}.")
 
             # Get image properties
-            with rasterio.open(self.image_meta["lr_file_dict"]["R"]) as src:
-                self.image_meta["width"], self.image_meta["height"], self.image_meta["dtype"] = src.width, src.height, src.dtypes[0]
+            first_band_path = next(iter(lr_file_dict.values()))
+            with rasterio.open(first_band_path) as src:
+                (
+                    self.image_meta["width"],
+                    self.image_meta["height"],
+                    self.image_meta["dtype"],
+                ) = (src.width, src.height, src.dtypes[0])
                 self.image_meta["transform"] = src.transform
                 self.image_meta["crs"] = src.crs
-                self.image_meta["bands"] = len(self.image_meta["lr_file_dict"])
+            same_grid = {}
+            for label, path in lr_file_dict.items():
+                with rasterio.open(path) as src:
+                    if (
+                        src.width == self.image_meta["width"]
+                        and src.height == self.image_meta["height"]
+                    ):
+                        same_grid[label] = path
+            self.image_meta["lr_file_dict"] = same_grid
+            self.image_meta["bands"] = len(self.image_meta["lr_file_dict"])
+            if self.image_meta["bands"] <= 0:
+                raise FileNotFoundError("No SAFE bands matched the selected grid size.")
 
         elif self.input_type == "S2GM":
             # Get LR image file paths
@@ -311,29 +388,67 @@ class large_file_processing():
                     if f.lower().endswith(".tif"):
                         tifs.append(os.path.join(root, f))
 
-            # Hard-map to RGB + NIR
-            self.image_meta["lr_file_dict"] = {
-                "R":  [p for p in tifs if os.path.basename(p) == "B04.tif"][0],
-                "G":  [p for p in tifs if os.path.basename(p) == "B03.tif"][0],
-                "B":  [p for p in tifs if os.path.basename(p) == "B02.tif"][0],
-                "NIR":[p for p in tifs if os.path.basename(p) == "B08.tif"][0],
+            if not tifs:
+                raise FileNotFoundError(
+                    f"No GeoTIFF bands found in S2GM folder {self.root}."
+                )
+
+            by_name = {
+                os.path.splitext(os.path.basename(p))[0]: p for p in sorted(tifs)
             }
+            lr_file_dict = {}
+            for label, band_name in (
+                ("R", "B04"),
+                ("G", "B03"),
+                ("B", "B02"),
+                ("NIR", "B08"),
+            ):
+                if band_name in by_name:
+                    lr_file_dict[label] = by_name[band_name]
+            used = set(lr_file_dict.values())
+            for band_name, path in by_name.items():
+                if path not in used:
+                    lr_file_dict[band_name] = path
+            self.image_meta["lr_file_dict"] = lr_file_dict
 
             # Get image properties
-            with rasterio.open(self.image_meta["lr_file_dict"]["R"]) as src:
+            with rasterio.open(
+                next(iter(self.image_meta["lr_file_dict"].values()))
+            ) as src:
                 self.image_meta["width"] = src.width
                 self.image_meta["height"] = src.height
                 self.image_meta["dtype"] = src.dtypes[0]
                 self.image_meta["transform"] = src.transform
                 self.image_meta["crs"] = src.crs
-                self.image_meta["bands"] = len(self.image_meta["lr_file_dict"])
-                
+            same_grid = {}
+            for label, path in self.image_meta["lr_file_dict"].items():
+                with rasterio.open(path) as src:
+                    if (
+                        src.width == self.image_meta["width"]
+                        and src.height == self.image_meta["height"]
+                    ):
+                        same_grid[label] = path
+            self.image_meta["lr_file_dict"] = same_grid
+            self.image_meta["bands"] = len(self.image_meta["lr_file_dict"])
+            if self.image_meta["bands"] <= 0:
+                raise FileNotFoundError("No S2GM bands matched the selected grid size.")
+
         # finally, add image windows to metadata
         self.image_meta["image_windows"] = self.create_image_windows()
         if not self.image_meta["image_windows"]:
-            raise ValueError("No image windows were created; check image size, window_size, and overlap.")
+            raise ValueError(
+                "No image windows were created; check image size, window_size, and overlap."
+            )
 
-    def create_placeholder_file(self, force: bool = False, wait_timeout_s: float = 600.0, wait_sleep_s: float = 0.2):
+    def create_placeholder_file(
+        self,
+        force: bool = False,
+        wait_timeout_s: float = 600.0,
+        wait_sleep_s: float = 0.2,
+        band_count=None,
+        dtype=None,
+        factor=None,
+    ):
         """
         Create an empty HR GeoTIFF placeholder for stitched SR results.
 
@@ -349,7 +464,7 @@ class large_file_processing():
         def _is_rank0_env() -> bool:
             # Works before torch.distributed is initialized
             lr = os.environ.get("LOCAL_RANK", "")
-            r  = os.environ.get("RANK", "")
+            r = os.environ.get("RANK", "")
             ws = os.environ.get("WORLD_SIZE", "1")
             if ws not in ("", "1"):
                 return (lr in ("", "0")) and (r in ("", "0"))
@@ -378,21 +493,35 @@ class large_file_processing():
                 return
 
             # Create (or overwrite) placeholder
-            nb = int(self.image_meta["bands"])
-            W  = int(self.image_meta["width"]  * self.factor)
-            H  = int(self.image_meta["height"] * self.factor)
+            scale = int(factor if factor is not None else self.factor)
+            nb = int(
+                band_count
+                if band_count is not None
+                else self.image_meta.get("output_bands") or self.image_meta["bands"]
+            )
+            if nb <= 0:
+                raise ValueError("Placeholder band count must be a positive integer.")
+            out_dtype = str(
+                dtype
+                if dtype is not None
+                else self.image_meta.get("output_dtype") or self.image_meta["dtype"]
+            )
+            W = int(self.image_meta["width"] * scale)
+            H = int(self.image_meta["height"] * scale)
             tr = self.image_meta["transform"]
-            save_transform = Affine(tr.a / self.factor, tr.b, tr.c, tr.d, tr.e / self.factor, tr.f)
+            save_transform = Affine(
+                tr.a / scale, tr.b, tr.c, tr.d, tr.e / scale, tr.f
+            )
 
             profile = {
                 "driver": "GTiff",
-                "dtype": self.image_meta["dtype"],
+                "dtype": out_dtype,
                 "count": nb,
                 "width": W,
                 "height": H,
                 "crs": self.image_meta["crs"],
                 "transform": save_transform,
-                "compress": "none",   # keep uncompressed while many writes happen
+                "compress": "none",  # keep uncompressed while many writes happen
                 "tiled": True,
                 "blockxsize": 512,
                 "blockysize": 512,
@@ -405,7 +534,9 @@ class large_file_processing():
             with rasterio.open(self.output_file_path, "w", **profile):
                 pass
 
-            self._log(f"💾 Saved empty placeholder SR image at: {self.output_file_path}")
+            self._log(
+                f"💾 Saved empty placeholder SR image at: {self.output_file_path}"
+            )
 
         else:
             # Non-rank0: wait until rank0 created a usable file and temp/
@@ -421,7 +552,7 @@ class large_file_processing():
                 time.sleep(wait_sleep_s)
             # No logging here (avoid concurrent writes); rank 0 logs already.
 
-    def create_image_windows(self): # Works
+    def create_image_windows(self):  # Works
         """
         Generate overlapping rasterio Windows covering the input image.
 
@@ -434,69 +565,35 @@ class large_file_processing():
         list of rasterio.windows.Window
             Coordinates of all LR patches to process.
         """
-        # get amount of overlap
-        overlap = self.overlap
-        if self.image_meta["width"] < self.window_size[0] or self.image_meta["height"] < self.window_size[1]:
+        overlap = int(self.overlap)
+        width = int(self.image_meta["width"])
+        height = int(self.image_meta["height"])
+        win_w = min(int(self.window_size[0]), width)
+        win_h = min(int(self.window_size[1]), height)
+        if width <= 0 or height <= 0:
             raise ValueError(
-                f"Input image ({self.image_meta['width']}x{self.image_meta['height']}) "
-                f"is smaller than window_size {self.window_size}."
+                f"Input image dimensions must be positive, got {width}x{height}."
             )
-        # Calculate the number of windows in each dimension
-        n_windows_x = (self.image_meta["width"] - overlap) // (self.window_size[0] - overlap)
-        n_windows_y = (self.image_meta["height"] - overlap) // (self.window_size[1] - overlap)
-        # Create list of batch windows coordinates
+
+        def axis_offsets(length, window):
+            if length <= window:
+                return [0]
+            stride = max(1, int(window) - overlap)
+            offsets = list(range(0, length - window + 1, stride))
+            final = length - window
+            if offsets[-1] != final:
+                offsets.append(final)
+            return offsets
+
         window_coordinates = []
-        for win_y in range(n_windows_y):
-            for win_x in range(n_windows_x):
-                # Define window to read with overlap
-                window = rasterio.windows.Window(
-                    win_x * (self.window_size[0] - overlap),
-                    win_y * (self.window_size[1] - overlap),
-                    self.window_size[0],
-                    self.window_size[1]
+        for row_off in axis_offsets(height, win_h):
+            for col_off in axis_offsets(width, win_w):
+                window_coordinates.append(
+                    rasterio.windows.Window(col_off, row_off, win_w, win_h)
                 )
-                window_coordinates.append(window)
 
-        # Check for any remaining space after the sliding window approach
-        final_x = self.image_meta["width"] - self.window_size[0]
-        final_y = self.image_meta["height"] - self.window_size[1]
-
-        # Add extra windows for the edges if there's remaining space
-        # Adjust the check to handle the overlap correctly
-        if final_x % (self.window_size[0] - overlap) > 0:
-            for win_y in range(n_windows_y):
-                window = rasterio.windows.Window(
-                    self.image_meta["width"] - self.window_size[0],
-                    win_y * (self.window_size[1] - overlap),
-                    self.window_size[0],
-                    self.window_size[1]
-                )
-                window_coordinates.append(window)
-
-        if final_y % (self.window_size[1] - overlap) > 0:
-            for win_x in range(n_windows_x):
-                window = rasterio.windows.Window(
-                    win_x * (self.window_size[0] - overlap),
-                    self.image_meta["height"] - self.window_size[1],
-                    self.window_size[0],
-                    self.window_size[1]
-                )
-                window_coordinates.append(window)
-
-        # Handle corner case if both x and y have remaining space
-        if (final_x % (self.window_size[0] - overlap) > 0 and
-                final_y % (self.window_size[1] - overlap) > 0):
-            window = rasterio.windows.Window(
-                self.image_meta["width"] - self.window_size[0],
-                self.image_meta["height"] - self.window_size[1],
-                self.window_size[0],
-                self.window_size[1]
-            )
-            window_coordinates.append(window)
-
-        # Return filled list of coordinates
         return window_coordinates
-    
+
     def delete_LR_temp(self):
         """
         Delete the temporary folder created for LR patches and intermediate files.
@@ -505,7 +602,9 @@ class large_file_processing():
         """
         temp_folder = os.path.abspath(self.temp_folder)
         if not os.path.basename(temp_folder).startswith("temp_"):
-            raise RuntimeError(f"Refusing to delete unexpected temp folder: {temp_folder}")
+            raise RuntimeError(
+                f"Refusing to delete unexpected temp folder: {temp_folder}"
+            )
         if os.path.isdir(temp_folder):
             shutil.rmtree(temp_folder)
             self._log(f"🗑️📂 Deleted temporary folder at: {temp_folder}")
@@ -528,9 +627,6 @@ class large_file_processing():
                 "Pass overwrite=True to replace it."
             )
 
-        # Create a fresh placeholder for this run. This avoids stale pixels from
-        # failed or repeated runs contaminating the final mosaic.
-        self.create_placeholder_file(force=True)
         self.start_super_resolution(debug=debug, save_preview=save_preview)
 
         trainer = getattr(self, "trainer", None)
@@ -546,6 +642,7 @@ class large_file_processing():
                     crop_and_save_georeferenced_excerpt,
                     generate_side_by_side_previews,
                 )
+
                 tif_path = self.final_sr_path
                 crop_and_save_georeferenced_excerpt(
                     self,
@@ -553,7 +650,9 @@ class large_file_processing():
                     out_tif=os.path.join(self.log_dir, "cropped_excerpt.tif"),
                     random_crop_size=(512, 512),
                 )
-                self._log("✅ Saved an example SR patch to cropped_excerpt.tif in logs folder.")
+                self._log(
+                    "✅ Saved an example SR patch to cropped_excerpt.tif in logs folder."
+                )
                 num_examples = 10
                 generate_side_by_side_previews(
                     self,
@@ -561,7 +660,9 @@ class large_file_processing():
                     out_dir=self.log_dir,
                     num_examples=num_examples,
                 )
-                self._log(f"✅ Saved {num_examples} side-by-side preview images to logs folder.")
+                self._log(
+                    f"✅ Saved {num_examples} side-by-side preview images to logs folder."
+                )
 
         self._log("🎉 Processing done! SR process exited.")
         return self.final_sr_path
@@ -588,9 +689,9 @@ class large_file_processing():
 
         # Hand the hook context to the model (consumed inside predict_step)
         self.model._save_temp_folder = self.temp_folder
-        self.model._save_windows     = windows_run
-        self.model._save_factor      = int(self.factor)
-        self.model._save_compressed  = bool(self.compressed_patches)
+        self.model._save_windows = windows_run
+        self.model._save_factor = int(self.factor)
+        self.model._save_compressed = bool(self.compressed_patches)
         self.model._save_progress_preview = bool(save_preview)
 
         # Devices: list[int] or 1 for CPU/single-GPU
@@ -598,35 +699,46 @@ class large_file_processing():
 
         # Build Trainer kwargs robustly across PL versions
         trainer_kwargs = dict(
-            accelerator=self.device,        # "cpu" or "cuda"
-            devices=devices,                # int or list of GPU ids
+            accelerator=self.device,  # "cpu" or "cuda"
+            devices=devices,  # int or list of GPU ids
             logger=False,
             enable_checkpointing=False,
             enable_model_summary=False,
-            inference_mode=True,            # no_grad + eval
-            enable_progress_bar=True,      # optional: cleaner logs
+            inference_mode=True,  # no_grad + eval
+            enable_progress_bar=True,  # optional: cleaner logs
         )
 
         # Use DDP only when we truly have >1 CUDA devices
-        if isinstance(devices, (list, tuple)) and len(devices) > 1 and self.device == "cuda":
+        if (
+            isinstance(devices, (list, tuple))
+            and len(devices) > 1
+            and self.device == "cuda"
+        ):
             trainer_kwargs["strategy"] = "ddp"
 
         # Make sure PL doesn't override our custom sampler
         sig = inspect.signature(Trainer)
-        if "replace_sampler_ddp" in sig.parameters:          # PL 1.x
+        if "replace_sampler_ddp" in sig.parameters:  # PL 1.x
             trainer_kwargs["replace_sampler_ddp"] = False
-        if "use_distributed_sampler" in sig.parameters:      # PL 2.x
+        if "use_distributed_sampler" in sig.parameters:  # PL 2.x
             trainer_kwargs["use_distributed_sampler"] = False
 
         trainer = Trainer(**trainer_kwargs)
-        self.trainer = trainer  # let _log() and later code see rank via trainer.is_global_zero
+        self.trainer = (
+            trainer  # let _log() and later code see rank via trainer.is_global_zero
+        )
 
         # Stream predictions to disk inside predict_step (we return None there)
         try:
-            trainer.predict(self.model, datamodule=self.datamodule, return_predictions=False)
+            trainer.predict(
+                self.model, datamodule=self.datamodule, return_predictions=False
+            )
         except RuntimeError as e:
             msg = str(e)
-            if "Lightning can't create new processes if CUDA is already initialized" in msg:
+            if (
+                "Lightning can't create new processes if CUDA is already initialized"
+                in msg
+            ):
                 # Stop the workflow cleanly (no noisy traceback for users)
                 self._log(
                     "🚨🔥 STOPPING WORKFLOW 🔥🚨\n"
@@ -643,9 +755,60 @@ class large_file_processing():
         is_ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
         rank = torch.distributed.get_rank() if is_ddp else 0
         if rank == 0:
-            self._log(f"✅ Prediction complete! SR patches saved in 📂: {self.temp_folder}")
+            self._log(
+                f"✅ Prediction complete! SR patches saved in 📂: {self.temp_folder}"
+            )
             if debug:
                 self._log("Debug mode was ON → processed only 100 windows.")
+
+    def _prepare_placeholder_from_prediction_index(self, index_path=None):
+        """
+        Create a fresh placeholder whose band count and dtype match saved patches.
+        """
+        if index_path is None:
+            index_path = os.path.join(self.temp_folder, "index.json")
+        if not os.path.exists(index_path):
+            return
+
+        with open(index_path, "r") as f:
+            idx = json.load(f)
+
+        entries = idx.get("entries", [])
+        output_bands = idx.get("output_bands")
+        if not output_bands:
+            entry_bands = {int(e["bands"]) for e in entries if e.get("bands")}
+            if len(entry_bands) == 1:
+                output_bands = entry_bands.pop()
+
+        if not output_bands and entries:
+            first_path = entries[0].get("path")
+            if first_path and os.path.exists(first_path):
+                import numpy as np
+
+                container = idx.get("saved_container", "npz")
+                key = idx.get("saved_key", "arr")
+                if container == "npz" and first_path.endswith(".npz"):
+                    with np.load(first_path) as z:
+                        output_bands = int(z[key].shape[0])
+                else:
+                    output_bands = int(np.load(first_path, mmap_mode="r").shape[0])
+
+        if not output_bands:
+            output_bands = int(self.image_meta["bands"])
+
+        output_dtype = idx.get("saved_dtype") or self.image_meta["dtype"]
+        output_factor = int(idx.get("factor", self.factor))
+        self.image_meta["output_bands"] = int(output_bands)
+        self.image_meta["output_dtype"] = str(output_dtype)
+        self.image_meta["output_factor"] = output_factor
+
+        # Create this after inference so output channel count can differ from input.
+        self.create_placeholder_file(
+            force=True,
+            band_count=int(output_bands),
+            dtype=str(output_dtype),
+            factor=output_factor,
+        )
 
     def write_to_file(self, index_path=None, limit=None, overwrite=None):
         """
@@ -683,18 +846,21 @@ class large_file_processing():
         multiple processes.
         """
         from opensr_utils.data_utils.writing_utils import ddp_safe_stitch
+
         if overwrite is not None:
             self.overwrite = bool(overwrite)
+        if self._is_rank0(getattr(self, "trainer", None)):
+            self._prepare_placeholder_from_prediction_index(index_path=index_path)
         return ddp_safe_stitch(
             self,
             index_path=index_path,
             limit=limit,
-            cleanup_every=50,     # tune if RAM pressure
-            profile="sigmoid",     # "linear"|"sigmoid"|"cosine"
+            cleanup_every=50,  # tune if RAM pressure
+            profile="sigmoid",  # "linear"|"sigmoid"|"cosine"
             profile_alpha=6.0,
             gdal_cache_mb=256,
         )
-    
+
     def _is_rank0(self, trainer=None):
         """Return True only for the process that should print (rank 0)."""
         import os, torch
@@ -711,7 +877,7 @@ class large_file_processing():
                 pass
 
         # Pre-init: rely on env set by the launcher
-        r  = os.environ.get("RANK", "")
+        r = os.environ.get("RANK", "")
         lr = os.environ.get("LOCAL_RANK", "")
         ws = os.environ.get("WORLD_SIZE", "")
         if ws not in ("", "1"):  # multi-process expected
@@ -728,7 +894,7 @@ class large_file_processing():
         --------
         - Always prints the message to stdout if called on rank 0.
         - Buffers messages in-memory (backlog) until `self.log_file` is set.
-        - Once `self.log_file` exists (created in `create_dirs()`), all backlog 
+        - Once `self.log_file` exists (created in `create_dirs()`), all backlog
         messages are flushed and new entries are appended to the log file.
         - If writing fails (e.g. permissions), the message is preserved in backlog.
 
@@ -749,7 +915,11 @@ class large_file_processing():
             self._log_backlog = []
 
         # if log_file not ready yet → backlog
-        if not hasattr(self, "log_file") or not self.log_file or not os.path.exists(os.path.dirname(self.log_file)):
+        if (
+            not hasattr(self, "log_file")
+            or not self.log_file
+            or not os.path.exists(os.path.dirname(self.log_file))
+        ):
             self._log_backlog.append(line)
             return
 

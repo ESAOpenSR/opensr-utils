@@ -3,6 +3,7 @@ from omegaconf import OmegaConf
 from io import StringIO
 import opensr_model  # your model package
 
+
 def get_ldsrs2(device: str = "cpu"):
     """
     Load the LDSR-S2 model on a specified device.
@@ -10,10 +11,10 @@ def get_ldsrs2(device: str = "cpu"):
     Parameters
     ----------
     device : str, optional
-        Device to load the model on. 
-        Options: "cpu", "cuda", "cuda:0", etc. 
+        Device to load the model on.
+        Options: "cpu", "cuda", "cuda:0", etc.
         Default is "cpu".
-    
+
     Returns
     -------
     opensr_model.SRLatentDiffusion

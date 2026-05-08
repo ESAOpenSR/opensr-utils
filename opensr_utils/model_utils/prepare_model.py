@@ -85,6 +85,7 @@ multiple GPUs without memory bottlenecks. Patches are streamed to disk and
 stitched later.
 """
 
+
 # -------------------------------------------------------------------------
 # Placeholder interpolation model
 class SRModelPL(LightningModule):
@@ -101,10 +102,16 @@ class SRModelPL(LightningModule):
     predict(x)
         Alias for forward; called inside predict_step.
     """
+
     def __init__(self, factor=4):
         super(SRModelPL, self).__init__()
+        if not isinstance(factor, int) or isinstance(factor, bool) or factor <= 0:
+            raise ValueError("factor must be a positive integer.")
         self.factor = int(factor)
+
     def forward(self, x):
+        if self.factor == 1:
+            return x
         sr = torch.nn.functional.interpolate(
             x,
             scale_factor=self.factor,
@@ -112,10 +119,11 @@ class SRModelPL(LightningModule):
             align_corners=False,
         )
         return sr
-    def predict(self,x):
+
+    def predict(self, x):
         return self.forward(x)
-    
-    
+
+
 def get_world_info():
     """
     Return (world_size, rank) in a robust way:
@@ -138,7 +146,7 @@ def get_world_info():
 
 # -------------------------------------------------------------------------
 # Preprocessor that also attaches predict_step + hooks that save predictions to disk
-def preprocess_model(self,model,temp_folder,windows,factor):
+def preprocess_model(self, model, temp_folder, windows, factor):
     """
     Prepare a model for distributed patch-based super-resolution inference.
 
@@ -155,7 +163,7 @@ def preprocess_model(self,model,temp_folder,windows,factor):
     windows : list of rasterio.windows.Window
         List of LR windows corresponding to input patches.
     factor : int
-        Upscaling factor (e.g., 4 for 10m → 2.5m).
+        Positive integer output scale. Use 1 for models that preserve resolution.
 
     Returns
     -------
@@ -191,7 +199,11 @@ def preprocess_model(self,model,temp_folder,windows,factor):
     - File naming encodes HR offsets: `sr_r{row_off_hr}_c{col_off_hr}.npz`.
     - Final `index.json` is consumed by the stitching stage.
     """
-    
+
+    if not isinstance(factor, int) or isinstance(factor, bool) or factor <= 0:
+        raise ValueError("factor must be a positive integer.")
+    factor = int(factor)
+
     # --- define hooks here so they stay out of the global namespace ---
     def _rank_world(self):
         """
@@ -222,8 +234,11 @@ def preprocess_model(self,model,temp_folder,windows,factor):
         self._rank, self._world = _rank_world(self)
         self._local_idx = 0
         self._entries = []
+        self._output_bands = None
         self._save_compressed = bool(getattr(self, "_save_compressed", False))
-        self._save_progress_preview = bool(getattr(self, "_save_progress_preview", False))
+        self._save_progress_preview = bool(
+            getattr(self, "_save_progress_preview", False)
+        )
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         """
@@ -245,13 +260,19 @@ def preprocess_model(self,model,temp_folder,windows,factor):
         - Handles both dict-of-lists (PL default) and list-of-dict meta formats.
         - Saves filenames as `sr_r{row_off_hr}_c{col_off_hr}.npz`.
         """
-        x    = batch["image"]                        # (B,C,H,W) tensor
-        meta = batch["meta"]                         # list[dict] or dict of lists
+        x = batch["image"]  # (B,C,H,W) tensor
+        meta = batch["meta"]  # list[dict] or dict of lists
         sr = self.predict(x) if hasattr(self, "predict") else self.forward(x)
-        sr = sr.detach().cpu()                       # (B,C,Hh,Ww)
+        sr = sr.detach().cpu()  # (B,C,Hh,Ww)
 
         scale = int(self._save_factor)
         B, C, Hh, Ww = sr.shape
+        if self._output_bands is None:
+            self._output_bands = int(C)
+        elif int(C) != int(self._output_bands):
+            raise ValueError(
+                f"Model output band count changed from {self._output_bands} to {C}."
+            )
 
         # meta may be a dict of lists (PL default); normalize to per-sample dicts
         if isinstance(meta, dict) and isinstance(meta["row_off"], torch.Tensor):
@@ -261,8 +282,10 @@ def preprocess_model(self,model,temp_folder,windows,factor):
 
         for i in range(B):
             mi = meta[i]
-            row_off_lr = mi["row_off"]; col_off_lr = mi["col_off"]
-            row_off_hr = row_off_lr * scale; col_off_hr = col_off_lr * scale
+            row_off_lr = mi["row_off"]
+            col_off_lr = mi["col_off"]
+            row_off_hr = row_off_lr * scale
+            col_off_hr = col_off_lr * scale
             expected_h = mi["height"] * scale
             expected_w = mi["width"] * scale
             if Hh != expected_h or Ww != expected_w:
@@ -271,7 +294,7 @@ def preprocess_model(self,model,temp_folder,windows,factor):
                     f"{expected_h}x{expected_w} for factor {scale}."
                 )
 
-            s = sr[i]                                # (C,Hh,Ww) float
+            s = sr[i]  # (C,Hh,Ww) float
             mean_val = float(torch.mean(s))
             # simple range heuristic: [0,1] vs already ~[0,10000]
             if mean_val < 10:
@@ -290,31 +313,44 @@ def preprocess_model(self,model,temp_folder,windows,factor):
             else:
                 np.save(out_path, arr)
 
-            self._entries.append({
-                "path": out_path,
-                "row_off_lr": row_off_lr, "col_off_lr": col_off_lr,
-                "height_lr":  mi["height"], "width_lr": mi["width"],
-                "row_off_hr": row_off_hr,   "col_off_hr": col_off_hr,
-                "height_hr":  int(Hh),      "width_hr":  int(Ww),
-            })
+            self._entries.append(
+                {
+                    "path": out_path,
+                    "row_off_lr": row_off_lr,
+                    "col_off_lr": col_off_lr,
+                    "height_lr": mi["height"],
+                    "width_lr": mi["width"],
+                    "row_off_hr": row_off_hr,
+                    "col_off_hr": col_off_hr,
+                    "height_hr": int(Hh),
+                    "width_hr": int(Ww),
+                    "bands": int(C),
+                }
+            )
 
             # logic to calculate logging steps - every 10% of total
-            ddp  = torch.distributed.is_available() and torch.distributed.is_initialized()
+            ddp = (
+                torch.distributed.is_available() and torch.distributed.is_initialized()
+            )
             rank = torch.distributed.get_rank() if ddp else 0
-            world= torch.distributed.get_world_size() if ddp else 1
-            is_rank0 = (rank == 0)
+            world = torch.distributed.get_world_size() if ddp else 1
+            is_rank0 = rank == 0
             global_total = int(self.model_dm_length)
-            local_interval = max(1, math.ceil((global_total / max(world,1)) / 10))
+            local_interval = max(1, math.ceil((global_total / max(world, 1)) / 10))
             if is_rank0 and self._save_progress_preview:
                 # avoid firing at 0
-                if global_total > 0 and self._local_idx > 0 and (self._local_idx % local_interval == 0):
+                if (
+                    global_total > 0
+                    and self._local_idx > 0
+                    and (self._local_idx % local_interval == 0)
+                ):
                     # CHW -> take RGB (or gray→RGB)
                     if arr.shape[0] >= 3:
                         rgb = arr[:3, :, :]
                     else:
                         rgb = np.repeat(arr[:1, :, :], 3, axis=0)
-                    
-                    x_i = x[i].detach().cpu()             # CHW float
+
+                    x_i = x[i].detach().cpu()  # CHW float
                     if x_i.shape[0] >= 3:
                         lr_rgb = x_i[:3, :, :].numpy()
                     else:
@@ -322,15 +358,27 @@ def preprocess_model(self,model,temp_folder,windows,factor):
 
                     # scale [0..10000] -> [0..255] with optional gain
                     gain = 3.5
-                    rgb = (((rgb/10_000)*gain)*255.0).astype(np.uint8).clip(0,255)
-                    lr_rgb = (((lr_rgb)*gain)*255.0).astype(np.uint8).clip(0,255)
+                    rgb = (
+                        (((rgb / 10_000) * gain) * 255.0).astype(np.uint8).clip(0, 255)
+                    )
+                    lr_rgb = (((lr_rgb) * gain) * 255.0).astype(np.uint8).clip(0, 255)
 
                     # CHW -> HWC for PIL
-                    rgb,lr_rgb = np.transpose(rgb, (1, 2, 0)), np.transpose(lr_rgb, (1, 2, 0))
+                    rgb, lr_rgb = np.transpose(rgb, (1, 2, 0)), np.transpose(
+                        lr_rgb, (1, 2, 0)
+                    )
 
                     # save
-                    Image.fromarray(rgb).save(os.path.join(self.log_dir, f"preview_sr_{self._local_idx:06d}.png"))
-                    Image.fromarray(lr_rgb).save(os.path.join(self.log_dir, f"preview_lr_{self._local_idx:06d}.png"))
+                    Image.fromarray(rgb).save(
+                        os.path.join(
+                            self.log_dir, f"preview_sr_{self._local_idx:06d}.png"
+                        )
+                    )
+                    Image.fromarray(lr_rgb).save(
+                        os.path.join(
+                            self.log_dir, f"preview_lr_{self._local_idx:06d}.png"
+                        )
+                    )
 
             self._local_idx += 1
 
@@ -368,18 +416,21 @@ def preprocess_model(self,model,temp_folder,windows,factor):
             "rank": self._rank,
             "world_size": self._world,
             "factor": int(self._save_factor),
+            "output_bands": int(self._output_bands or 0),
             "entries": self._entries,
             "saved_dtype": "uint16",
             "saved_scale": 10000,
             "saved_container": "npz" if self._save_compressed else "npy",
             "saved_key": "arr",
         }
-        shard_path = os.path.join(self._save_temp_folder, f"index_rank{self._rank}.json")
+        shard_path = os.path.join(
+            self._save_temp_folder, f"index_rank{self._rank}.json"
+        )
         with open(shard_path, "w") as f:
             json.dump(shard, f, separators=(",", ":"))  # compact
             f.flush()
             os.fsync(f.fileno())
-        #print(f"[rank {self._rank}] wrote {len(self._entries)} entries → {shard_path}")
+        # print(f"[rank {self._rank}] wrote {len(self._entries)} entries → {shard_path}")
 
         # ---- DDP sync ----
         ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
@@ -389,16 +440,21 @@ def preprocess_model(self,model,temp_folder,windows,factor):
         # ---- Merge on rank 0 (or single-process) ----
         if (not ddp) or (torch.distributed.get_rank() == 0):
             world = self._world if ddp else 1
-            shard_paths = [os.path.join(self._save_temp_folder, f"index_rank{r}.json") for r in range(world)]
+            shard_paths = [
+                os.path.join(self._save_temp_folder, f"index_rank{r}.json")
+                for r in range(world)
+            ]
 
             # (Optional) wait briefly if FS is slow
             for _ in range(50):
-                if all(os.path.exists(p) for p in shard_paths): break
+                if all(os.path.exists(p) for p in shard_paths):
+                    break
                 time.sleep(0.05)
 
             merged_entries = []
             meta = {
                 "factor": int(self._save_factor),
+                "output_bands": None,
                 "saved_dtype": "uint16",
                 "saved_scale": 10000,
                 "saved_container": "npz" if self._save_compressed else "npy",
@@ -409,6 +465,15 @@ def preprocess_model(self,model,temp_folder,windows,factor):
                     raise RuntimeError(f"Missing prediction shard index: {p}")
                 with open(p) as f:
                     data = json.load(f)
+                shard_bands = data.get("output_bands")
+                if shard_bands:
+                    if meta["output_bands"] is None:
+                        meta["output_bands"] = int(shard_bands)
+                    elif int(shard_bands) != int(meta["output_bands"]):
+                        raise ValueError(
+                            "Prediction shards disagree on output band count: "
+                            f"{meta['output_bands']} vs {shard_bands}."
+                        )
                 merged_entries.extend(data.get("entries", []))
 
             # dedupe & deterministic order
@@ -421,6 +486,15 @@ def preprocess_model(self,model,temp_folder,windows,factor):
                     seen.add(k)
                     uniq.append(e)
             uniq.sort(key=lambda e: (e["row_off_lr"], e["col_off_lr"]))
+            entry_bands = {int(e["bands"]) for e in uniq if e.get("bands")}
+            if len(entry_bands) > 1:
+                raise ValueError(
+                    f"Prediction entries disagree on output band count: {sorted(entry_bands)}."
+                )
+            if meta["output_bands"] is None and entry_bands:
+                meta["output_bands"] = entry_bands.pop()
+            if meta["output_bands"] is None:
+                meta["output_bands"] = 0
 
             merged = {**meta, "entries": uniq}
             merged_path = os.path.join(self._save_temp_folder, "index.json")
@@ -428,25 +502,28 @@ def preprocess_model(self,model,temp_folder,windows,factor):
                 json.dump(merged, f, separators=(",", ":"))
                 f.flush()
                 os.fsync(f.fileno())
-            #print(f"[rank 0] merged {len(uniq)} entries → {merged_path}")
-        
+            # print(f"[rank 0] merged {len(uniq)} entries → {merged_path}")
+
         # CleanUp
         try:
             KEEP_SHARDS = False  # toggle for debugging
-            KEEP_PARTS = False   # toggle for debugging
+            KEEP_PARTS = False  # toggle for debugging
             if not KEEP_SHARDS:
                 for p in shard_paths:
-                    try: os.remove(p)
-                    except FileNotFoundError: pass
-                    
-            # optional: nuke partials
-            if KEEP_PARTS==False:
-                for p in glob.glob(os.path.join(self._save_temp_folder, "*.part")):
-                    try: os.remove(p)
-                    except FileNotFoundError: pass
-        except UnboundLocalError:
-            pass # If we're in single GPU, or in CPU, these variables dont exist
+                    try:
+                        os.remove(p)
+                    except FileNotFoundError:
+                        pass
 
+            # optional: nuke partials
+            if KEEP_PARTS == False:
+                for p in glob.glob(os.path.join(self._save_temp_folder, "*.part")):
+                    try:
+                        os.remove(p)
+                    except FileNotFoundError:
+                        pass
+        except UnboundLocalError:
+            pass  # If we're in single GPU, or in CPU, these variables dont exist
 
     # ---------------------------------------------------------------------
     # Attach hooks to model
@@ -478,12 +555,18 @@ def preprocess_model(self,model,temp_folder,windows,factor):
         model.eval()
     elif isinstance(model, torch.nn.Module):
         self._log("Model is a torch.nn.Module. Wrapping in LightningModule ✅.")
+
         class WrappedModel(LightningModule):
             def __init__(self, mdl):
                 super().__init__()
                 self.model = mdl
-            def forward(self, x): return self.model(x)
-            def predict(self, x): return self.forward(x)
+
+            def forward(self, x):
+                return self.model(x)
+
+            def predict(self, x):
+                return self.forward(x)
+
         wrapped_model = WrappedModel(model)
         wrapped_model.eval()
         model = wrapped_model
@@ -493,12 +576,15 @@ def preprocess_model(self,model,temp_folder,windows,factor):
         placeholder_model.eval()
         model = placeholder_model
     else:
-        raise NotImplementedError("Model must be a LightningModule, torch.nn.Module, or None.")
-
+        raise NotImplementedError(
+            "Model must be a LightningModule, torch.nn.Module, or None."
+        )
 
     # set model variables
-    model.log_dir = self.log_dir # set log dir for previews
-    model.model_dm_length = len(self.datamodule.dataset) # set datamodule length for preview interval
+    model.log_dir = self.log_dir  # set log dir for previews
+    model.model_dm_length = len(
+        self.datamodule.dataset
+    )  # set datamodule length for preview interval
     model = _attach_hooks(model)
     model._save_temp_folder = temp_folder
     model._save_windows = windows

@@ -1,4 +1,5 @@
 import torch
+
 # import dataloader and dataset functions
 from torch.utils.data import Dataset, DataLoader
 from pytorch_lightning import LightningDataModule
@@ -9,12 +10,12 @@ from rasterio.windows import Window
 from torch.utils.data import Sampler
 
 
-
 class ShardedInferenceSampler(Sampler[int]):
     """
     No-duplicate sampler for DDP inference.
     Splits [0, N) into `world_size` contiguous shards; last shards may be shorter.
     """
+
     def __init__(self, dataset_len: int, *, rank: int, world_size: int):
         self.dataset_len = int(dataset_len)
         self.rank = int(rank)
@@ -23,11 +24,11 @@ class ShardedInferenceSampler(Sampler[int]):
             raise ValueError(f"Bad rank/world_size: {self.rank}/{self.world_size}")
 
         base = self.dataset_len // self.world_size
-        rem  = self.dataset_len %  self.world_size
+        rem = self.dataset_len % self.world_size
         # First `rem` ranks get one extra item
         self.length = base + (1 if self.rank < rem else 0)
-        self.start  = self.rank * base + min(self.rank, rem)
-        self.end    = self.start + self.length
+        self.start = self.rank * base + min(self.rank, rem)
+        self.end = self.start + self.length
 
     def __iter__(self):
         # Range is empty if dataset_len < rank start (rare but valid)
@@ -47,7 +48,6 @@ def _infer_rank_world():
     return rank, world
 
 
-
 # Dataset class for PyTorch Lightning
 class PredictionDataset(Dataset):
     """
@@ -59,8 +59,9 @@ class PredictionDataset(Dataset):
         under `IMG_DATA`.
       - **S2GM** : a Sentinel-2 Global Mosaic (S2GM) folder containing per-band TIFFs.
 
-    For each window, reads the corresponding patch, stacks RGB+NIR, and returns
-    a normalized FloatTensor.
+    For each window, reads the corresponding patch and returns a normalized
+    FloatTensor. Dictionary inputs keep the common R,G,B,NIR order when those
+    labels are present and append any additional bands in the provided order.
 
     Parameters
     ----------
@@ -82,25 +83,37 @@ class PredictionDataset(Dataset):
     Notes
     -----
     - Input values are divided by 10000.0 and clamped to [0,1].
-    - Band order is always RGB+NIR (4 channels).
+    - File inputs preserve the raster's native band order and band count.
+    - Dictionary inputs can contain any number of bands.
     """
 
-    def __init__(self,input_type,root,windows,lr_file_dict):
+    def __init__(self, input_type, root, windows, lr_file_dict):
         # Set properties
         self.input_type = input_type
         self.root = root
         self.windows = windows
+        self.lr_file_dict = lr_file_dict
         self._src_cache = {}
-        
+
         # 1. If file
         if self.input_type == "file":
-            self.lr_file_dict = lr_file_dict
+            pass
         # 2. If SAFE
         elif self.input_type == "SAFE":
-            self.lr_file_dict = lr_file_dict
+            pass
         # 3. If S2GM
         elif self.input_type == "S2GM":
-            self.lr_file_dict = lr_file_dict
+            pass
+
+        self.band_order = self._resolve_band_order()
+
+    def _resolve_band_order(self):
+        if self.input_type == "file" or not self.lr_file_dict:
+            return []
+        preferred = ["R", "G", "B", "NIR"]
+        ordered = [band for band in preferred if band in self.lr_file_dict]
+        ordered.extend(band for band in self.lr_file_dict if band not in ordered)
+        return ordered
 
     def __getstate__(self):
         state = self.__dict__.copy()
@@ -130,13 +143,13 @@ class PredictionDataset(Dataset):
         # Get metadata of this datapoint and carry over
         win = self.windows[idx]
         meta = {
-        "row_off": int(win.row_off),
-        "col_off": int(win.col_off),
-        "height":  int(win.height),
-        "width":   int(win.width),
-        "index":   int(idx),
-}
-        
+            "row_off": int(win.row_off),
+            "col_off": int(win.col_off),
+            "height": int(win.height),
+            "width": int(win.width),
+            "index": int(idx),
+        }
+
         # Get image window from file depending on input type
         if self.input_type == "file":
             img = self.get_from_file(idx)
@@ -145,7 +158,7 @@ class PredictionDataset(Dataset):
         elif self.input_type == "S2GM":
             img = self.get_from_dict(idx)
         else:
-            raise NotImplementedError(f"Input type {self.input_type} not supported.")    
+            raise NotImplementedError(f"Input type {self.input_type} not supported.")
         # perform normalizations here
         img = img / 10000.0  # Scale to [0,1] assuming input is in [0,10000]
         img = torch.clamp(img, 0.0, 1.0)
@@ -153,7 +166,7 @@ class PredictionDataset(Dataset):
         img = img.type(torch.float32)
         # return batch image
         return {"image": img, "meta": meta}
-    
+
     def get_from_file(self, idx):
         """
         Read a patch from a single GeoTIFF file.
@@ -173,10 +186,10 @@ class PredictionDataset(Dataset):
         data = src.read(window=window)  # np.ndarray
         data = data.astype(np.float32)
         return torch.from_numpy(data)
-    
+
     def get_from_dict(self, idx):
         """
-        Read RGB+NIR bands from a Sentinel-2 SAFE folder for a given window.
+        Read one window from a dictionary of single-band rasters.
 
         Parameters
         ----------
@@ -186,18 +199,18 @@ class PredictionDataset(Dataset):
         Returns
         -------
         torch.FloatTensor
-            (4,H,W) patch with bands in [R,G,B,NIR] order, float32.
+            (C,H,W) patch with bands in ``self.band_order``, float32.
         """
         window = self.windows[idx]
-        bands_order = ["R", "G", "B", "NIR"]
         tiles = []
-        for b in bands_order:
+        for b in self.band_order:
             src = self._open_cached(self.lr_file_dict[b])
             tile = src.read(1, window=window)
             tiles.append(tile)
+        if not tiles:
+            raise ValueError("No input bands were configured for dictionary input.")
         arr = np.stack(tiles, axis=0).astype(np.float32)
         return torch.from_numpy(arr)
-    
 
 
 class PredictionDataModule(LightningDataModule):
@@ -227,8 +240,17 @@ class PredictionDataModule(LightningDataModule):
     dataset : PredictionDataset
         Dataset instance created during `setup()`.
     """
-    def __init__(self, input_type,root,windows,lr_file_dict,
-                 prefetch_factor=2, batch_size=16, num_workers=4):
+
+    def __init__(
+        self,
+        input_type,
+        root,
+        windows,
+        lr_file_dict,
+        prefetch_factor=2,
+        batch_size=16,
+        num_workers=4,
+    ):
         super().__init__()
         self.input_type = input_type
         self.root = root
@@ -247,10 +269,12 @@ class PredictionDataModule(LightningDataModule):
         stage : str, optional
             Lightning stage flag (ignored in this implementation).
         """
-        self.dataset = PredictionDataset(input_type=self.input_type,
-                                     root=self.root,
-                                     windows=self.windows,
-                                     lr_file_dict=self.lr_file_dict)
+        self.dataset = PredictionDataset(
+            input_type=self.input_type,
+            root=self.root,
+            windows=self.windows,
+            lr_file_dict=self.lr_file_dict,
+        )
 
     def predict_dataloader(self):
         # Determine if we’re in DDP
@@ -275,10 +299,10 @@ class PredictionDataModule(LightningDataModule):
         return DataLoader(
             self.dataset,
             batch_size=self.batch_size,
-            shuffle=False,                 # IMPORTANT: never shuffle for predict with a sampler
-            sampler=sampler,               # None on CPU/1-GPU; sharded on DDP
+            shuffle=False,  # IMPORTANT: never shuffle for predict with a sampler
+            sampler=sampler,  # None on CPU/1-GPU; sharded on DDP
             num_workers=self.num_workers,
             pin_memory=pin_memory,
-            persistent_workers=False,      # safer for repeated runs
+            persistent_workers=False,  # safer for repeated runs
             prefetch_factor=pf,
         )
