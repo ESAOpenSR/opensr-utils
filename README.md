@@ -125,6 +125,10 @@ In order to avoid patching artifacts that are present in many SR products, we pe
 Example of Patching Artifacts in other SR models:  
 ![img5](resources/artifact_example.png)
 
+### Local Demo
+Run `python demo_local.py` to generate a local overlap demo. It simulates an SR image with per-patch spectral shifts, so the edge alignment can be seen in `playground/bilinear_cross_overlap_demo/comparison_input_and_srs.png`.
+![Local overlap demo](resources/local_overlap_demo.png)
+
 
 # Citation
 If you use this code in your research, please cite:
