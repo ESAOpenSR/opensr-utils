@@ -62,7 +62,12 @@ def test_write_to_placeholder_blends_overlapping_patch_edges(tmp_path, dummy_run
     }
 
     writing_utils.write_to_placeholder(
-        dummy_runner, np.full((1, 4, 8), 100, dtype=np.uint16), 0, image_meta, factor=4
+        dummy_runner,
+        np.full((1, 4, 8), 100, dtype=np.uint16),
+        0,
+        image_meta,
+        factor=4,
+        overlap=4,
     )
     writing_utils.write_to_placeholder(
         dummy_runner,
@@ -79,6 +84,153 @@ def test_write_to_placeholder_blends_overlapping_patch_edges(tmp_path, dummy_run
     assert row[:4].tolist() == [100, 100, 100, 100]
     assert row[4:8].tolist() == [100, 133, 166, 200]
     assert row[8:].tolist() == [200, 200, 200, 200]
+
+
+def test_write_to_placeholder_blends_valid_zero_predictions(tmp_path, dummy_runner):
+    path = make_placeholder(tmp_path / "placeholder.tif", width=12, height=4, count=1)
+    image_meta = {
+        "placeholder_path": str(path),
+        "dtype": "uint16",
+        "window_coordinates": [Window(0, 0, 2, 1), Window(1, 0, 2, 1)],
+    }
+
+    writing_utils.write_to_placeholder(
+        dummy_runner,
+        np.zeros((1, 4, 8), dtype=np.uint16),
+        0,
+        image_meta,
+        factor=4,
+        overlap=4,
+    )
+    writing_utils.write_to_placeholder(
+        dummy_runner,
+        np.full((1, 4, 8), 100, dtype=np.uint16),
+        1,
+        image_meta,
+        factor=4,
+        overlap=4,
+        profile="linear",
+    )
+
+    with rasterio.open(path) as src:
+        row = src.read(1)[0]
+    assert row[4:8].tolist() == [0, 33, 66, 100]
+
+
+def test_write_to_placeholder_discards_both_internal_patch_edges(
+    tmp_path, dummy_runner
+):
+    path = make_placeholder(tmp_path / "placeholder.tif", width=12, height=4, count=1)
+    image_meta = {
+        "placeholder_path": str(path),
+        "dtype": "uint16",
+        "window_coordinates": [Window(0, 0, 2, 1), Window(1, 0, 2, 1)],
+    }
+    left = np.full((1, 4, 8), 100, dtype=np.uint16)
+    right = np.full((1, 4, 8), 200, dtype=np.uint16)
+    left[:, :, -1] = 9000
+    right[:, :, 0] = 8000
+
+    writing_utils.write_to_placeholder(
+        dummy_runner,
+        left,
+        0,
+        image_meta,
+        factor=4,
+        overlap=4,
+        eliminate_border_px=1,
+        profile="linear",
+    )
+    writing_utils.write_to_placeholder(
+        dummy_runner,
+        right,
+        1,
+        image_meta,
+        factor=4,
+        overlap=4,
+        eliminate_border_px=1,
+        profile="linear",
+    )
+
+    with rasterio.open(path) as src:
+        row = src.read(1)[0]
+    assert row[4:8].tolist() == [100, 100, 200, 200]
+    assert 8000 not in row
+    assert 9000 not in row
+
+
+def test_write_to_placeholder_discards_vertical_internal_patch_edges(
+    tmp_path, dummy_runner
+):
+    path = make_placeholder(tmp_path / "placeholder.tif", width=4, height=12, count=1)
+    image_meta = {
+        "placeholder_path": str(path),
+        "dtype": "uint16",
+        "window_coordinates": [Window(0, 0, 1, 2), Window(0, 1, 1, 2)],
+    }
+    top = np.full((1, 8, 4), 100, dtype=np.uint16)
+    bottom = np.full((1, 8, 4), 200, dtype=np.uint16)
+    top[:, -1, :] = 9000
+    bottom[:, 0, :] = 8000
+
+    writing_utils.write_to_placeholder(
+        dummy_runner,
+        top,
+        0,
+        image_meta,
+        factor=4,
+        overlap=4,
+        eliminate_border_px=1,
+        profile="linear",
+    )
+    writing_utils.write_to_placeholder(
+        dummy_runner,
+        bottom,
+        1,
+        image_meta,
+        factor=4,
+        overlap=4,
+        eliminate_border_px=1,
+        profile="linear",
+    )
+
+    with rasterio.open(path) as src:
+        col = src.read(1)[:, 0]
+    assert col[4:8].tolist() == [100, 100, 200, 200]
+    assert 8000 not in col
+    assert 9000 not in col
+
+
+def test_write_to_placeholder_blending_is_order_independent(tmp_path, dummy_runner):
+    arrays = [
+        np.full((1, 4, 8), 100, dtype=np.uint16),
+        np.full((1, 4, 8), 200, dtype=np.uint16),
+    ]
+
+    def run_case(name, order):
+        path = make_placeholder(tmp_path / name, width=12, height=4, count=1)
+        image_meta = {
+            "placeholder_path": str(path),
+            "dtype": "uint16",
+            "window_coordinates": [Window(0, 0, 2, 1), Window(1, 0, 2, 1)],
+        }
+        for idx in order:
+            writing_utils.write_to_placeholder(
+                dummy_runner,
+                arrays[idx],
+                idx,
+                image_meta,
+                factor=4,
+                overlap=4,
+                profile="linear",
+            )
+        with rasterio.open(path) as src:
+            return src.read(1)
+
+    np.testing.assert_array_equal(
+        run_case("forward.tif", [0, 1]),
+        run_case("reverse.tif", [1, 0]),
+    )
 
 
 def test_write_to_placeholder_clips_integer_outputs(tmp_path, dummy_runner):
@@ -186,6 +338,8 @@ def test_stitch_sr_patches_loads_index_writes_final_and_cleans_patches(tmp_path)
     assert out == str(tmp_path / "sr.tif")
     assert missing == 0
     assert not placeholder.exists()
+    assert not (tmp_path / "sr_placeholder_unit.tif.sum.tif").exists()
+    assert not (tmp_path / "sr_placeholder_unit.tif.weights.tif").exists()
     assert not patch_a.exists()
     assert not patch_b.exists()
     with rasterio.open(out) as src:

@@ -7,8 +7,184 @@ from rasterio.windows import Window
 from tqdm import tqdm
 
 
+def _make_ramp(n: int, curve: str, alpha: float) -> np.ndarray:
+    if n <= 0:
+        return np.zeros((0,), dtype=np.float32)
+    if n == 1:
+        return np.array([0.5], dtype=np.float32)
+    t = np.linspace(0.0, 1.0, n, dtype=np.float32)
+    if curve == "linear":
+        r = t
+    elif curve == "sigmoid":
+        a = float(alpha)
+        r = 1.0 / (1.0 + np.exp(-a * (t - 0.5)))
+        r = (r - r[0]) / (r[-1] - r[0] + 1e-12)
+    elif curve == "cosine":
+        r = 0.5 * (1.0 - np.cos(np.pi * t))
+    else:
+        raise ValueError(
+            f"Unknown profile '{curve}' (use 'linear'|'sigmoid'|'cosine')."
+        )
+    return r.astype(np.float32)
+
+
+def _apply_edge_ramp(
+    vec: np.ndarray,
+    side: str,
+    overlap_px: int,
+    cut_px: int,
+    curve: str,
+    alpha: float,
+):
+    n = int(vec.shape[0])
+    cut_px = min(max(0, int(cut_px)), n)
+    overlap_px = min(max(0, int(overlap_px)), n)
+    ramp_len = min(max(0, overlap_px - cut_px), max(0, n - cut_px))
+    if side in ("left", "top"):
+        if cut_px > 0:
+            vec[:cut_px] = 0.0
+        if ramp_len > 0:
+            r = _make_ramp(ramp_len, curve, alpha)
+            vec[cut_px : cut_px + ramp_len] = np.minimum(
+                vec[cut_px : cut_px + ramp_len], r
+            )
+    else:
+        if cut_px > 0:
+            vec[-cut_px:] = 0.0
+        if ramp_len > 0:
+            r = _make_ramp(ramp_len, curve, alpha)[::-1]
+            seg = slice(-(cut_px + ramp_len), -cut_px if cut_px > 0 else None)
+            vec[seg] = np.minimum(vec[seg], r)
+
+
+def _patch_weight(
+    *,
+    hr_win: Window,
+    height: int,
+    width: int,
+    dst_height: int,
+    dst_width: int,
+    overlap: int,
+    eliminate_border_px: int,
+    profile: str,
+    profile_alpha: float,
+) -> np.ndarray:
+    u = np.ones(width, dtype=np.float32)
+    v = np.ones(height, dtype=np.float32)
+    if overlap > 0:
+        if int(hr_win.col_off) > 0:
+            _apply_edge_ramp(
+                u, "left", overlap, eliminate_border_px, profile, profile_alpha
+            )
+        if int(hr_win.col_off + hr_win.width) < dst_width:
+            _apply_edge_ramp(
+                u, "right", overlap, eliminate_border_px, profile, profile_alpha
+            )
+        if int(hr_win.row_off) > 0:
+            _apply_edge_ramp(
+                v, "top", overlap, eliminate_border_px, profile, profile_alpha
+            )
+        if int(hr_win.row_off + hr_win.height) < dst_height:
+            _apply_edge_ramp(
+                v, "bottom", overlap, eliminate_border_px, profile, profile_alpha
+            )
+    return (v[:, None] * u[None, :]).astype(np.float32)
+
+
+def _accumulator_path(placeholder_path: str, name: str) -> str:
+    return f"{placeholder_path}.{name}.tif"
+
+
+def _accumulator_matches(path: str, *, width: int, height: int, count: int) -> bool:
+    if not os.path.exists(path):
+        return False
+    try:
+        with rasterio.open(path) as src:
+            return (
+                src.width == width
+                and src.height == height
+                and src.count == count
+                and np.dtype(src.dtypes[0]) == np.dtype("float32")
+            )
+    except Exception:
+        return False
+
+
+def _create_accumulator_files(
+    dst,
+    *,
+    sum_path: str,
+    weight_path: str,
+    initialize_from_dst: bool,
+):
+    sum_profile = dst.profile.copy()
+    sum_profile.update(
+        dtype="float32",
+        count=dst.count,
+        nodata=0,
+        compress="none",
+        sparse_ok=True,
+    )
+    weight_profile = dst.profile.copy()
+    weight_profile.update(
+        dtype="float32",
+        count=1,
+        nodata=0,
+        compress="none",
+        sparse_ok=True,
+    )
+    for profile in (sum_profile, weight_profile):
+        if not profile.get("tiled", False):
+            profile.pop("blockxsize", None)
+            profile.pop("blockysize", None)
+
+    with rasterio.open(sum_path, "w", **sum_profile) as sum_dst, rasterio.open(
+        weight_path, "w", **weight_profile
+    ) as weight_dst:
+        if not initialize_from_dst:
+            return
+        nodata = dst.nodata
+        for _, win in dst.block_windows(1):
+            ph = dst.read(window=win).astype(np.float32)
+            if nodata is None:
+                valid = (ph != 0).any(axis=0).astype(np.float32)
+            else:
+                valid = (ph != nodata).any(axis=0).astype(np.float32)
+            sum_dst.write(ph * valid[None, ...], window=win)
+            weight_dst.write(valid, 1, window=win)
+
+
+def _ensure_accumulator_files(
+    dst,
+    *,
+    sum_path: str,
+    weight_path: str,
+    initialize_from_dst: bool = True,
+):
+    if _accumulator_matches(
+        sum_path, width=dst.width, height=dst.height, count=dst.count
+    ) and _accumulator_matches(
+        weight_path, width=dst.width, height=dst.height, count=1
+    ):
+        return
+    _create_accumulator_files(
+        dst,
+        sum_path=sum_path,
+        weight_path=weight_path,
+        initialize_from_dst=initialize_from_dst,
+    )
+
+
+def _count_uncovered_pixels(weight_dst) -> int:
+    uncovered = 0
+    for _, win in weight_dst.block_windows(1):
+        weights = weight_dst.read(1, window=win)
+        uncovered += int(np.count_nonzero(weights <= 0))
+    return uncovered
+
+
 # -----------------------------
-# Blending a single patch (yours, now supports an optional open handle)
+# Blending a single patch
 # -----------------------------
 def write_to_placeholder(
     self,
@@ -21,15 +197,18 @@ def write_to_placeholder(
     *,
     profile: str = "linear",  # "linear" | "sigmoid" | "cosine"
     profile_alpha: float = 6.0,  # steepness for sigmoid
-    dst=None,  # <-- NEW: optionally pass an already-open rasterio dataset in "r+" mode
+    dst=None,
+    sum_dst=None,
+    weight_dst=None,
 ):
     """
     Blend a single super-resolved (SR) patch into a placeholder GeoTIFF.
 
     This function writes one SR patch into its corresponding location within a
-    large output raster, applying smooth feathering ramps at patch edges to
-    avoid visible seams. Overlaps with already-written data are weighted by
-    a blending profile (linear, sigmoid, or cosine). At the global dataset
+    large output raster, applying smooth feathering ramps at internal patch
+    edges to avoid visible seams. Overlaps are accumulated through explicit
+    sum and weight rasters, so blending is independent of write order and
+    valid zero-valued predictions are handled correctly. At the global dataset
     borders, patches are written without feathering to prevent black frames.
 
     Parameters
@@ -70,12 +249,20 @@ def write_to_placeholder(
     dst : rasterio.io.DatasetWriter, optional
         If provided, an already-open GeoTIFF dataset in ``r+`` mode.
         If None, the function will open and close the file internally.
+    sum_dst, weight_dst : rasterio.io.DatasetWriter, optional
+        Optional open float32 accumulator datasets. ``sum_dst`` must have the
+        same band count as ``dst``; ``weight_dst`` must have one band. If not
+        provided, sidecar accumulator files are created next to the placeholder
+        and reused across calls.
 
     Notes
     -----
-    - Blending is performed in float32 and cast to ``image_meta["dtype"]`` at the end.
-    - Nodata values in the placeholder are respected when detecting valid data.
-    - Borders of the global raster are written without blending to avoid artifacts.
+    - Blending is accumulated in float32 and cast to the placeholder dtype at
+      the end of each call.
+    - Borders of the global raster are written without blending or border
+      discard to avoid artifacts.
+    - ``eliminate_border_px`` is applied to every internal tile edge, including
+      tiles written before their neighbours.
     - For best performance, call this function with an already-open ``dst`` handle
       inside a loop (see :func:`stitch_sr_patches`).
 
@@ -94,52 +281,6 @@ def write_to_placeholder(
     ...     dst=open_dataset  # re-use handle inside a loop
     ... )
     """
-
-    # -------------------------
-    # Helpers for ramps
-    # -------------------------
-    def make_ramp(n: int, curve: str, alpha: float) -> np.ndarray:
-        if n <= 0:
-            return np.zeros((0,), dtype=np.float32)
-        t = np.linspace(0.0, 1.0, n, dtype=np.float32)
-        if curve == "linear":
-            r = t
-        elif curve == "sigmoid":
-            a = float(alpha)
-            r = 1.0 / (1.0 + np.exp(-a * (t - 0.5)))
-            r = (r - r[0]) / (r[-1] - r[0] + 1e-12)
-        elif curve == "cosine":
-            r = 0.5 * (1.0 - np.cos(np.pi * t))
-        else:
-            raise ValueError(
-                f"Unknown profile '{curve}' (use 'linear'|'sigmoid'|'cosine')."
-            )
-        return r.astype(np.float32)
-
-    def apply_edge_ramp(
-        vec: np.ndarray,
-        side: str,
-        overlap_px: int,
-        cut_px: int,
-        curve: str,
-        alpha: float,
-    ):
-        ramp_len = max(0, overlap_px - cut_px)
-        if side in ("left", "top"):
-            if cut_px > 0:
-                vec[:cut_px] = 0.0
-            if ramp_len > 0:
-                r = make_ramp(ramp_len, curve, alpha)  # 0→1
-                vec[cut_px : cut_px + ramp_len] = np.minimum(
-                    vec[cut_px : cut_px + ramp_len], r
-                )
-        else:  # right/bottom
-            if cut_px > 0:
-                vec[-cut_px:] = 0.0
-            if ramp_len > 0:
-                r = make_ramp(ramp_len, curve, alpha)[::-1]  # 1→0
-                seg = slice(-(cut_px + ramp_len), -cut_px if cut_px > 0 else None)
-                vec[seg] = np.minimum(vec[seg], r)
 
     # -------------------------
     # Coerce sr to float32 CHW
@@ -201,6 +342,12 @@ def write_to_placeholder(
         raise ValueError("overlap and eliminate_border_px must be >= 0")
     if elim > overlap:
         elim = overlap
+    if overlap > 0 and profile not in {"linear", "sigmoid", "cosine"}:
+        raise ValueError(
+            f"Unknown profile '{profile}' (use 'linear'|'sigmoid'|'cosine')."
+        )
+    if (sum_dst is None) != (weight_dst is None):
+        raise ValueError("sum_dst and weight_dst must be provided together.")
 
     lr_win = image_meta["window_coordinates"][idx]
     row_off = int(lr_win.row_off * factor)
@@ -214,6 +361,7 @@ def write_to_placeholder(
     if not _external:
         dst = rasterio.open(image_meta["placeholder_path"], "r+")
 
+    _external_accumulators = sum_dst is not None
     try:
         expected_C = dst.count
         sr = coerce_to_chw_float32(sr, expected_C=expected_C)
@@ -222,48 +370,65 @@ def write_to_placeholder(
             raise ValueError(f"Band mismatch: dst has {expected_C} bands, SR has {C}")
 
         hr_win = Window(col_off=col_off, row_off=row_off, width=W, height=H)
-        ph = dst.read(window=hr_win).astype(np.float32)
+        if (
+            int(hr_win.col_off) < 0
+            or int(hr_win.row_off) < 0
+            or int(hr_win.col_off + hr_win.width) > dst.width
+            or int(hr_win.row_off + hr_win.height) > dst.height
+        ):
+            raise ValueError(
+                f"Patch window {hr_win} exceeds placeholder bounds "
+                f"{dst.width}x{dst.height}."
+            )
 
-        # nodata-aware valid mask
-        nd = dst.nodata
-        if nd is None:
-            valid = (ph != 0).any(axis=0)
+        if not _external_accumulators:
+            sum_path = image_meta.get("sum_path") or _accumulator_path(
+                image_meta["placeholder_path"], "sum"
+            )
+            weight_path = image_meta.get("weight_path") or _accumulator_path(
+                image_meta["placeholder_path"], "weights"
+            )
+            _ensure_accumulator_files(
+                dst,
+                sum_path=sum_path,
+                weight_path=weight_path,
+                initialize_from_dst=True,
+            )
+            sum_dst = rasterio.open(sum_path, "r+")
+            weight_dst = rasterio.open(weight_path, "r+")
         else:
-            valid = (ph != nd).any(axis=0)
-        valid = valid.astype(np.float32)
+            if sum_dst.count != C:
+                raise ValueError(
+                    f"Accumulator band mismatch: sum has {sum_dst.count} bands, SR has {C}"
+                )
+            if weight_dst.count != 1:
+                raise ValueError("weight_dst must have exactly one band.")
 
-        # dataset borders
-        touch_left = hr_win.col_off == 0
-        touch_right = hr_win.col_off + hr_win.width == dst.width
-        touch_top = hr_win.row_off == 0
-        touch_bottom = hr_win.row_off + hr_win.height == dst.height
+        accum = sum_dst.read(window=hr_win).astype(np.float32)
+        weights = weight_dst.read(1, window=hr_win).astype(np.float32)
+        tile_weight = _patch_weight(
+            hr_win=hr_win,
+            height=H,
+            width=W,
+            dst_height=dst.height,
+            dst_width=dst.width,
+            overlap=overlap,
+            eliminate_border_px=elim,
+            profile=profile,
+            profile_alpha=profile_alpha,
+        )
+        accum = accum + sr * tile_weight[None, ...]
+        weights = weights + tile_weight
+        sum_dst.write(accum, window=hr_win)
+        weight_dst.write(weights, 1, window=hr_win)
 
-        # detect overlap over a thin band
-        if overlap > 0:
-            b = max(1, min(overlap, max(1, W // 4), max(1, H // 4)))
-        else:
-            b = 1
-        left_valid = valid[:, :b].any()
-        right_valid = valid[:, -b:].any()
-        top_valid = valid[:b, :].any()
-        bottom_valid = valid[-b:, :].any()
-
-        # 1D weights
-        u = np.ones(W, dtype=np.float32)
-        v = np.ones(H, dtype=np.float32)
-        if left_valid and not touch_left:
-            apply_edge_ramp(u, "left", overlap, elim, profile, profile_alpha)
-        if right_valid and not touch_right:
-            apply_edge_ramp(u, "right", overlap, elim, profile, profile_alpha)
-        if top_valid and not touch_top:
-            apply_edge_ramp(v, "top", overlap, elim, profile, profile_alpha)
-        if bottom_valid and not touch_bottom:
-            apply_edge_ramp(v, "bottom", overlap, elim, profile, profile_alpha)
-
-        # 2D weights & blend
-        w_sr_2d = (v[:, None] * u[None, :]).astype(np.float32)
-        w_ph_2d = (1.0 - w_sr_2d) * valid
-        out = w_sr_2d[None, ...] * sr + w_ph_2d[None, ...] * ph
+        out = np.zeros_like(accum, dtype=np.float32)
+        np.divide(
+            accum,
+            weights[None, ...],
+            out=out,
+            where=weights[None, ...] > 0,
+        )
 
         target_dtype = np.dtype(dst.dtypes[0])
         if np.issubdtype(target_dtype, np.integer):
@@ -274,6 +439,11 @@ def write_to_placeholder(
         for bidx in range(C):
             dst.write(out[bidx], bidx + 1, window=hr_win)
     finally:
+        if not _external_accumulators:
+            if weight_dst is not None:
+                weight_dst.close()
+            if sum_dst is not None:
+                sum_dst.close()
         # only close if we opened it here
         if not _external:
             dst.close()
@@ -389,46 +559,74 @@ def stitch_sr_patches(
                     f"Placeholder has {dst.count} bands, but predictions have "
                     f"{int(expected_bands)} bands."
                 )
-            for i, e in enumerate(
-                tqdm(entries, desc="Stitching → placeholder", unit="tile"), start=1
-            ):
-                p = e["path"]
-                try:
-                    if container == "npz" and p.endswith(".npz"):
-                        with np.load(p) as z:
-                            sr = z[key]
-                    else:
-                        sr = np.load(p)
-
-                    write_to_placeholder(
-                        self,
-                        sr,
-                        i - 1,
-                        image_meta,
-                        factor=factor,
-                        overlap=overlap,
-                        eliminate_border_px=eliminate_border_px,
-                        profile=profile,
-                        profile_alpha=profile_alpha,
-                        dst=dst,  # <-- reuse open dataset
-                    )
-                    to_delete.append(p)
-                except FileNotFoundError:
-                    missing_count += 1
-
-                # periodic flush + cleanup
-                if cleanup_every and (i % cleanup_every == 0):
-                    for fp in to_delete:
+            sum_path = _accumulator_path(image_meta["placeholder_path"], "sum")
+            weight_path = _accumulator_path(image_meta["placeholder_path"], "weights")
+            try:
+                _create_accumulator_files(
+                    dst,
+                    sum_path=sum_path,
+                    weight_path=weight_path,
+                    initialize_from_dst=False,
+                )
+                with rasterio.open(sum_path, "r+") as sum_dst, rasterio.open(
+                    weight_path, "r+"
+                ) as weight_dst:
+                    for i, e in enumerate(
+                        tqdm(entries, desc="Stitching → placeholder", unit="tile"),
+                        start=1,
+                    ):
+                        p = e["path"]
                         try:
-                            os.remove(fp)
+                            if container == "npz" and p.endswith(".npz"):
+                                with np.load(p) as z:
+                                    sr = z[key]
+                            else:
+                                sr = np.load(p)
+
+                            write_to_placeholder(
+                                self,
+                                sr,
+                                i - 1,
+                                image_meta,
+                                factor=factor,
+                                overlap=overlap,
+                                eliminate_border_px=eliminate_border_px,
+                                profile=profile,
+                                profile_alpha=profile_alpha,
+                                dst=dst,
+                                sum_dst=sum_dst,
+                                weight_dst=weight_dst,
+                            )
+                            to_delete.append(p)
                         except FileNotFoundError:
-                            pass
-                        for leftover in glob.glob(fp + ".*"):
-                            try:
-                                os.remove(leftover)
-                            except FileNotFoundError:
-                                pass
-                    to_delete.clear()
+                            missing_count += 1
+
+                        # periodic flush + cleanup
+                        if cleanup_every and (i % cleanup_every == 0):
+                            for fp in to_delete:
+                                try:
+                                    os.remove(fp)
+                                except FileNotFoundError:
+                                    pass
+                                for leftover in glob.glob(fp + ".*"):
+                                    try:
+                                        os.remove(leftover)
+                                    except FileNotFoundError:
+                                        pass
+                            to_delete.clear()
+
+                    if limit is None and missing_count == 0:
+                        uncovered = _count_uncovered_pixels(weight_dst)
+                        if uncovered:
+                            raise RuntimeError(
+                                f"{uncovered} output pixels were not covered by any tile."
+                            )
+            finally:
+                for aux_path in (sum_path, weight_path):
+                    try:
+                        os.remove(aux_path)
+                    except FileNotFoundError:
+                        pass
 
     if missing_count:
         raise RuntimeError(

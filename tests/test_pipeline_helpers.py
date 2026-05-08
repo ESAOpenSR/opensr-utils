@@ -197,6 +197,51 @@ def test_create_image_windows_uses_single_clipped_window_for_small_images():
     assert windows[0].height == 5
 
 
+@pytest.mark.parametrize(
+    ("width", "height", "window_size", "overlap"),
+    [
+        (21, 17, (8, 8), 2),
+        (9, 9, (8, 8), 4),
+        (257, 129, (128, 128), 8),
+        (7, 5, (8, 8), 2),
+        (16, 16, (8, 8), 0),
+    ],
+)
+def test_create_image_windows_cover_pixels_without_underlapping(
+    width, height, window_size, overlap
+):
+    runner = blank_runner()
+    runner.window_size = window_size
+    runner.overlap = overlap
+    runner.image_meta = {"width": width, "height": height}
+
+    windows = runner.create_image_windows()
+    coverage = np.zeros((height, width), dtype=np.uint8)
+    for win in windows:
+        x0 = int(win.col_off)
+        y0 = int(win.row_off)
+        x1 = x0 + int(win.width)
+        y1 = y0 + int(win.height)
+        assert 0 <= x0 < x1 <= width
+        assert 0 <= y0 < y1 <= height
+        coverage[y0:y1, x0:x1] += 1
+
+    assert coverage.min() > 0
+
+    for axis_length, win_length, offsets in [
+        (width, min(window_size[0], width), sorted({int(w.col_off) for w in windows})),
+        (
+            height,
+            min(window_size[1], height),
+            sorted({int(w.row_off) for w in windows}),
+        ),
+    ]:
+        assert offsets[0] == 0
+        assert offsets[-1] + win_length == axis_length
+        for left, right in zip(offsets, offsets[1:]):
+            assert right - left <= win_length - overlap
+
+
 def test_create_placeholder_file_writes_scaled_geotiff(tmp_path):
     rasterio = pytest.importorskip("rasterio")
     runner = blank_runner()
