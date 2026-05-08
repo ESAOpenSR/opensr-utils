@@ -8,7 +8,12 @@ try:
 except Exception:
     __version__ = "unknown"
 
-# expose high-level class for convenience
-from .pipeline import large_file_processing
-
 __all__ = ["large_file_processing", "__version__"]
+
+
+def __getattr__(name):
+    if name == "large_file_processing":
+        from .pipeline import large_file_processing
+
+        return large_file_processing
+    raise AttributeError(f"module 'opensr_utils' has no attribute {name!r}")

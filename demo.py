@@ -6,16 +6,10 @@ This script shows:
   1. How to instantiate an SR model from opensr-model
   2. How to run large-scale inference with opensr-utils
 """
-import torch
-import requests
-from omegaconf import OmegaConf
-from io import StringIO
-
-
 # --- 1) Create Model -------------------------------------------------
 device = "cuda"  # or "cpu" - Dont use the automated detection, it messes up the lightning trainer multi-GPU setup
 from opensr_utils.model_utils.get_models import get_ldsrs2
-model = get_ldsrs2()
+model = get_ldsrs2(device="cpu")
 
 # --- 2) Run large-scale Inference ------------------------------------
 import opensr_utils
@@ -32,3 +26,4 @@ sr_object = opensr_utils.large_file_processing(
     device=device,             # "cuda" for GPU-accelerated inference
     gpus=0,                    # pass GPU ID or list of GPUs
 )
+sr_object.run()

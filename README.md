@@ -57,7 +57,7 @@ opensr-run /data/flood_scene.tif LDSRS2   --window_size 128 128   --factor 4   -
 
 **Arguments explained:**
 - `root` → Path to the input file or folder (`.tif`, `.SAFE`, or S2GM).  
-- `model` → Must be `LDSRS2` for CLI usage (any other value falls back to a no-model pipeline).  
+- `model` → `LDSRS2` or `None` for the interpolation placeholder.  
 - `--window_size` → Patch size in LR pixels (default: `128 128`).  
 - `--factor` → Upscaling factor (default: `4`).  
 - `--overlap` → Overlap in pixels to avoid patch seams (default: `8`).  
@@ -66,6 +66,8 @@ opensr-run /data/flood_scene.tif LDSRS2   --window_size 128 128   --factor 4   -
 - `--gpus` → List of GPU IDs (e.g. `0 1`).  
 - `--save_preview` → Saves LR/SR preview images every 10% of progress.  
 - `--debug` → Process only ~100 windows for testing.  
+- `--overwrite` → Replace an existing `sr.tif`; otherwise existing outputs are preserved.  
+- `--keep_temp` → Keep temporary patch files after stitching.  
 
 ---
 
@@ -81,15 +83,14 @@ First, download a .SAFE tile from the Copernicus Browser, a Mosaic folder from S
 
 #### 1. install libraries
 ```sql
-pip install opensr-utils
-pip install opensr-model
+pip install "opensr-utils[model]"
 ```
 #### 2. Create Model - in this case our LDSR-S2 Model
 ```python
-# Instanciate Model
-import opensr_model # import pachage
-model = opensr_model.SRLatentDiffusion(config, device=device) # create model
-model.load_pretrained(config.ckpt_version) # load checkpoint
+from opensr_utils.model_utils.get_models import get_ldsrs2
+
+device = "cuda"
+model = get_ldsrs2(device="cpu")
 ```
 #### 3. Run large-scale Inference
 
@@ -110,7 +111,7 @@ sr_object = opensr_utils.large_file_processing(
 			debug=False,
 		)
 
-sr_object.start_super_resolution()
+sr_object.run()
 ```
 
 
@@ -131,11 +132,11 @@ If you use this code in your research, please cite:
 ```bibtex
 @software{Donike_OpenSR-Utils_2025,
 author = {Donike, Simon and Gomez-Chova, Luis},
-license = {Apache-2.0},
+license = {MIT},
 month = nov,
 title = {{OpenSR-Utils}},
 url = {https://github.com/ESAOpenSR/opensr-utils},
-version = {0.3.0},
+version = {1.2.0},
 year = {2025},
 doi = {10.5281/zenodo.17599310}
 }

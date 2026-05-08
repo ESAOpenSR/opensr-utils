@@ -90,6 +90,7 @@ class PredictionDataset(Dataset):
         self.input_type = input_type
         self.root = root
         self.windows = windows
+        self._src_cache = {}
         
         # 1. If file
         if self.input_type == "file":
@@ -101,6 +102,26 @@ class PredictionDataset(Dataset):
         elif self.input_type == "S2GM":
             self.lr_file_dict = lr_file_dict
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_src_cache"] = {}
+        return state
+
+    def _open_cached(self, path):
+        if path not in self._src_cache:
+            self._src_cache[path] = rasterio.open(path)
+        return self._src_cache[path]
+
+    def close(self):
+        for src in self._src_cache.values():
+            src.close()
+        self._src_cache.clear()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __len__(self):
         return len(self.windows)
@@ -148,8 +169,8 @@ class PredictionDataset(Dataset):
             (C,H,W) patch in native band order, float32.
         """
         window = self.windows[idx]
-        with rasterio.open(self.root) as src:
-            data = src.read(window=window)  # np.ndarray
+        src = self._open_cached(self.root)
+        data = src.read(window=window)  # np.ndarray
         data = data.astype(np.float32)
         return torch.from_numpy(data)
     
@@ -171,9 +192,9 @@ class PredictionDataset(Dataset):
         bands_order = ["R", "G", "B", "NIR"]
         tiles = []
         for b in bands_order:
-            with rasterio.open(self.lr_file_dict[b]) as src:
-                tile = src.read(1, window=window)
-                tiles.append(tile)
+            src = self._open_cached(self.lr_file_dict[b])
+            tile = src.read(1, window=window)
+            tiles.append(tile)
         arr = np.stack(tiles, axis=0).astype(np.float32)
         return torch.from_numpy(arr)
     

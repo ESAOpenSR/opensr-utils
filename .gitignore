@@ -27,6 +27,7 @@ uncertainty.py
 
 # other
 __pycache__/*
+__pycache__
 *.pyc
 
 # Byte-compiled / optimized / DLL files

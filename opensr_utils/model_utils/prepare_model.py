@@ -87,11 +87,11 @@ stitched later.
 
 # -------------------------------------------------------------------------
 # Placeholder interpolation model
-class SRModelPL(LightningModule): 
+class SRModelPL(LightningModule):
     """
     Placeholder LightningModule for SR inference.
 
-    Uses bilinear interpolation to resize input patches to 512×512. Useful when
+    Uses bilinear interpolation to resize input patches by the requested factor. Useful when
     no trained model is provided, for testing the end-to-end pipeline.
 
     Methods
@@ -101,10 +101,16 @@ class SRModelPL(LightningModule):
     predict(x)
         Alias for forward; called inside predict_step.
     """
-    def __init__(self):
+    def __init__(self, factor=4):
         super(SRModelPL, self).__init__()
+        self.factor = int(factor)
     def forward(self, x):
-        sr = torch.nn.functional.interpolate(x, size=(512, 512), mode="bilinear")
+        sr = torch.nn.functional.interpolate(
+            x,
+            scale_factor=self.factor,
+            mode="bilinear",
+            align_corners=False,
+        )
         return sr
     def predict(self,x):
         return self.forward(x)
@@ -216,6 +222,8 @@ def preprocess_model(self,model,temp_folder,windows,factor):
         self._rank, self._world = _rank_world(self)
         self._local_idx = 0
         self._entries = []
+        self._save_compressed = bool(getattr(self, "_save_compressed", False))
+        self._save_progress_preview = bool(getattr(self, "_save_progress_preview", False))
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         """
@@ -255,6 +263,13 @@ def preprocess_model(self,model,temp_folder,windows,factor):
             mi = meta[i]
             row_off_lr = mi["row_off"]; col_off_lr = mi["col_off"]
             row_off_hr = row_off_lr * scale; col_off_hr = col_off_lr * scale
+            expected_h = mi["height"] * scale
+            expected_w = mi["width"] * scale
+            if Hh != expected_h or Ww != expected_w:
+                raise ValueError(
+                    f"Model output shape {Hh}x{Ww} does not match expected "
+                    f"{expected_h}x{expected_w} for factor {scale}."
+                )
 
             s = sr[i]                                # (C,Hh,Ww) float
             mean_val = float(torch.mean(s))
@@ -267,9 +282,13 @@ def preprocess_model(self,model,temp_folder,windows,factor):
             s = torch.round(s)
             arr = s.numpy().astype(np.uint16, copy=False)
 
-            fn = f"sr_r{row_off_hr:09d}_c{col_off_hr:09d}.npz"
+            ext = "npz" if self._save_compressed else "npy"
+            fn = f"sr_r{row_off_hr:09d}_c{col_off_hr:09d}.{ext}"
             out_path = os.path.join(self._save_temp_folder, fn)
-            np.savez_compressed(out_path, arr=arr)   # direct compressed save
+            if self._save_compressed:
+                np.savez_compressed(out_path, arr=arr)
+            else:
+                np.save(out_path, arr)
 
             self._entries.append({
                 "path": out_path,
@@ -284,9 +303,9 @@ def preprocess_model(self,model,temp_folder,windows,factor):
             rank = torch.distributed.get_rank() if ddp else 0
             world= torch.distributed.get_world_size() if ddp else 1
             is_rank0 = (rank == 0)
-            global_total = int(model.model_dm_length)
+            global_total = int(self.model_dm_length)
             local_interval = max(1, math.ceil((global_total / max(world,1)) / 10))
-            if is_rank0:
+            if is_rank0 and self._save_progress_preview:
                 # avoid firing at 0
                 if global_total > 0 and self._local_idx > 0 and (self._local_idx % local_interval == 0):
                     # CHW -> take RGB (or gray→RGB)
@@ -313,6 +332,7 @@ def preprocess_model(self,model,temp_folder,windows,factor):
                     Image.fromarray(rgb).save(os.path.join(self.log_dir, f"preview_sr_{self._local_idx:06d}.png"))
                     Image.fromarray(lr_rgb).save(os.path.join(self.log_dir, f"preview_lr_{self._local_idx:06d}.png"))
 
+            self._local_idx += 1
 
         return None
 
@@ -351,7 +371,7 @@ def preprocess_model(self,model,temp_folder,windows,factor):
             "entries": self._entries,
             "saved_dtype": "uint16",
             "saved_scale": 10000,
-            "saved_container": "npz",
+            "saved_container": "npz" if self._save_compressed else "npy",
             "saved_key": "arr",
         }
         shard_path = os.path.join(self._save_temp_folder, f"index_rank{self._rank}.json")
@@ -381,12 +401,12 @@ def preprocess_model(self,model,temp_folder,windows,factor):
                 "factor": int(self._save_factor),
                 "saved_dtype": "uint16",
                 "saved_scale": 10000,
-                "saved_container": "npz",
+                "saved_container": "npz" if self._save_compressed else "npy",
                 "saved_key": "arr",
             }
             for p in shard_paths:
                 if not os.path.exists(p):
-                    continue  # tolerate empty shard or failed worker
+                    raise RuntimeError(f"Missing prediction shard index: {p}")
                 with open(p) as f:
                     data = json.load(f)
                 merged_entries.extend(data.get("entries", []))
@@ -469,7 +489,7 @@ def preprocess_model(self,model,temp_folder,windows,factor):
         model = wrapped_model
     elif model is None:
         self._log("⚠️ No model provided - using placeholder interpolation model.")
-        placeholder_model = SRModelPL()
+        placeholder_model = SRModelPL(factor=factor)
         placeholder_model.eval()
         model = placeholder_model
     else:

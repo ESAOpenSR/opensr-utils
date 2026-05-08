@@ -1,28 +1,18 @@
-# Core scientific stack
+# Core package dependencies
 numpy
-scipy
-pandas
-
-# Deep learning
+einops
+rasterio
+tqdm
 torch>=2.0.0
 torchvision
 pytorch-lightning>=2.0.0
-
-# Geospatial I/O
-rasterio
-GDAL
-shapely
-
-# Utilities
-tqdm
-glob2
-einops
 omegaconf
-pyyaml
-
-# Visualization & debugging
 matplotlib
-seaborn
+scikit-image
+xarray
+requests
+Pillow
 
-# Project packages (installed via PyPI or editable mode if local)
+# Optional helpers used by the LDSR-S2 model loader and COG converter
 opensr-model>=1.0.0
+rio-cogeo

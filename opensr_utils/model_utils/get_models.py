@@ -21,7 +21,8 @@ def get_ldsrs2(device: str = "cpu"):
     """
     # config
     config_url = "https://raw.githubusercontent.com/ESAOpenSR/opensr-model/refs/heads/main/opensr_model/configs/config_10m.yaml"
-    response = requests.get(config_url)
+    response = requests.get(config_url, timeout=30)
+    response.raise_for_status()
     config = OmegaConf.load(StringIO(response.text))
 
     # model

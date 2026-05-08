@@ -1,6 +1,5 @@
 def main():
     import argparse
-    import math
     from opensr_utils.pipeline import large_file_processing
 
 
@@ -28,6 +27,20 @@ def main():
                         help="🖼️ Also save one georeferenced crop and 10 LR/SR previews")
     parser.add_argument("--debug", action="store_true",
                         help="🐞 Debug mode: process only ~100 windows")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Replace an existing sr.tif output")
+    parser.add_argument("--keep_temp", action="store_true",
+                        help="Keep temporary patch files after stitching")
+    parser.add_argument("--delete_input_zip", action="store_true",
+                        help="Delete the source .zip after successful extraction")
+    parser.add_argument("--batch_size", type=int, default=16,
+                        help="Prediction batch size (default: 16)")
+    parser.add_argument("--num_workers", type=int, default=4,
+                        help="DataLoader worker count (default: 4)")
+    parser.add_argument("--prefetch_factor", type=int, default=2,
+                        help="DataLoader prefetch factor when workers > 0 (default: 2)")
+    parser.add_argument("--compressed_patches", action="store_true",
+                        help="Store temporary patches as compressed .npz files")
 
     args = parser.parse_args()
 
@@ -35,17 +48,9 @@ def main():
     if args.model == "LDSRS2":
         # Lazy import to avoid CUDA init unless needed
         try:
-            from omegaconf import OmegaConf
-            from io import StringIO
-            import requests  # your model package
-            import opensr_model  # your model package
-            # Instantiate model
+            from opensr_utils.model_utils.get_models import get_ldsrs2
             device = "cpu"  # "cuda" or "cpu" - Dont use the torch automated detection here, it messes up the lightning trainer multi-GPU setup
-            config_url = "https://raw.githubusercontent.com/ESAOpenSR/opensr-model/refs/heads/main/opensr_model/configs/config_10m.yaml"
-            response = requests.get(config_url)
-            config = OmegaConf.load(StringIO(response.text))
-            model = opensr_model.SRLatentDiffusion(config, device=device)
-            model.load_pretrained(config.ckpt_version)
+            model = get_ldsrs2(device=device)
 
         except Exception as e:
             print("❌ Could not load LDSR-S2 model from 'opensr_model'.")
@@ -67,7 +72,15 @@ def main():
         gpus=args.gpus if args.device == "cuda" else None,
         save_preview=args.save_preview,
         debug=args.debug,
+        cleanup=not args.keep_temp,
+        overwrite=args.overwrite,
+        delete_input_zip=args.delete_input_zip,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        compressed_patches=args.compressed_patches,
     )
+    runner.run()
 
 if __name__ == "__main__":
     main()

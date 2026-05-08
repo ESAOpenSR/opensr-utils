@@ -143,24 +143,20 @@ def create_dirs(self):
     else:
         base = p
 
-    # Where we drop tiny markers so other ranks can read the chosen paths
-    logs_marker = base / ".logs_path"   # contains absolute path to the logs dir
-    ready_marker = base / ".dirs_ready" # indicates rank0 finished mkdirs
+    run_id = getattr(self, "run_id", os.environ.get("OPENSR_RUN_ID", "default"))
+    # Where we drop tiny markers so other ranks can read the chosen paths.
+    logs_marker = base / f".opensr_{run_id}_logs_path"
+    temp_marker = base / f".opensr_{run_id}_temp_path"
+    ready_marker = base / f".opensr_{run_id}_dirs_ready"
 
     is_r0 = _is_rank0_env()
 
     if is_r0:
-        # --- Pick logs dir (auto-increment) and create it ---
-        log_base = base / "logs"
-        log_dir = log_base
-        counter = 1
-        while log_dir.exists():
-            counter += 1
-            log_dir = base / f"logs_{counter}"
+        # --- Pick run-scoped log/temp dirs and create them ---
+        log_dir = base / f"logs_{run_id}"
         os.makedirs(log_dir, exist_ok=True)
 
-        # --- Create temp dir (no increment) ---
-        temp_dir = base / "temp"
+        temp_dir = base / f"temp_{run_id}"
         os.makedirs(temp_dir, exist_ok=True)
 
         # --- Create log file once ---
@@ -170,6 +166,10 @@ def create_dirs(self):
         # --- Write markers so non-rank0 can discover paths deterministically ---
         try:
             logs_marker.write_text(str(log_dir))
+        except Exception:
+            pass
+        try:
+            temp_marker.write_text(str(temp_dir))
         except Exception:
             pass
         try:
@@ -185,17 +185,8 @@ def create_dirs(self):
     else:
         # --- Non-rank0: wait until rank0 finished mkdirs ---
         def _dirs_ready():
-            # Either marker exists or both temp dir and some logs dir exist
-            if ready_marker.exists():
+            if ready_marker.exists() and logs_marker.exists() and temp_marker.exists():
                 return True
-            if (base / "temp").exists():
-                # logs dir could be logs/ or logs_N/
-                if (base / "logs").exists():
-                    return True
-                # any logs_* directory?
-                for d in base.iterdir():
-                    if d.is_dir() and d.name.startswith("logs"):
-                        return True
             return False
 
         _wait_until(_dirs_ready, what="directory creation")
@@ -213,16 +204,17 @@ def create_dirs(self):
                 log_dir_path = None
 
         if log_dir_path is None:
-            # Fallback: prefer "logs" if present, else highest numbered logs_*
-            if (base / "logs").exists():
-                log_dir_path = base / "logs"
-            else:
-                candidates = sorted([d for d in base.iterdir() if d.is_dir() and d.name.startswith("logs")])
-                if not candidates:
-                    raise RuntimeError("Could not locate logs directory created by rank0.")
-                log_dir_path = candidates[-1]
+            raise RuntimeError("Could not locate logs directory created by rank0.")
 
-        temp_dir = base / "temp"
+        temp_dir = None
+        if temp_marker.exists():
+            text = temp_marker.read_text().strip()
+            if text:
+                maybe = Path(text)
+                if maybe.exists():
+                    temp_dir = maybe
+        if temp_dir is None:
+            raise RuntimeError("Could not locate temp directory created by rank0.")
         if not temp_dir.exists():
             raise RuntimeError("Temp directory does not exist yet; rank0 mkdir likely failed.")
 
@@ -234,12 +226,14 @@ def create_dirs(self):
     # Common paths for all ranks
     self.placeholder_path = str(base)
     self.output_dir = str(base)
-    self.placeholder_filepath = str(base / "sr_placeholder.tif")
+    self.placeholder_filepath = str(base / f"sr_placeholder_{run_id}.tif")
     self.output_file_path = self.placeholder_filepath
+    self.final_sr_path = str(base / "sr.tif")
 
     # Metadata
     self.image_meta["placeholder_dir"] = self.placeholder_path
     self.image_meta["placeholder_filepath"] = self.placeholder_filepath
+    self.image_meta["final_sr_path"] = self.final_sr_path
 
 def verify_input_file_type(self, root):
     """
@@ -272,6 +266,16 @@ def verify_input_file_type(self, root):
         except Exception:
             return False
 
+    def _safe_extract(zf, destination: Path):
+        dest = destination.resolve()
+        for member in zf.infolist():
+            member_path = (destination / member.filename).resolve()
+            try:
+                member_path.relative_to(dest)
+            except ValueError as exc:
+                raise RuntimeError(f"Unsafe path in zip archive: {member.filename}") from exc
+        zf.extractall(destination)
+
     self.root = str(root)
     p = Path(self.root)
 
@@ -293,7 +297,7 @@ def verify_input_file_type(self, root):
             if need_unzip and p.exists():
                 self._log(f"📦 Unzipping: {p.name}")
                 with zipfile.ZipFile(p, "r") as zf:
-                    zf.extractall(extract_dir)
+                    _safe_extract(zf, extract_dir)
 
             # Mark ready for other ranks
             try:
@@ -301,13 +305,10 @@ def verify_input_file_type(self, root):
             except Exception:
                 pass
 
-            # Optionally delete zip (rank0 only)
-            if self.debug is False and p.exists():
-                try:
-                    p.unlink()
-                    self._log(f"🗑️ Deleted archive: {p.name}")
-                except FileNotFoundError:
-                    pass
+            # Optionally delete zip (rank0 only). Keep the source archive by default.
+            if getattr(self, "delete_input_zip", False) and p.exists():
+                p.unlink()
+                self._log(f"🗑️ Deleted archive: {p.name}")
         else:
             # Non-rank0: wait until .SAFE appears (or sentinel says ok)
             timeout_s = 600.0
@@ -353,4 +354,3 @@ def verify_input_file_type(self, root):
 
     # ---------------- Not recognized ----------------
     raise NotImplementedError("🚫 Input path is not valid (file, .SAFE, or S2GM).")
-

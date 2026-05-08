@@ -346,8 +346,10 @@ def stitch_sr_patches(
         ],
     }
     factor = int(self.factor)
-    overlap = int(self.overlap)
-    eliminate_border_px = int(self.eliminate_border_px)
+    # Public overlap/eliminate_border_px are specified in LR pixels. Blending
+    # happens on SR patches, so convert both to HR pixels.
+    overlap = int(self.overlap) * factor
+    eliminate_border_px = int(self.eliminate_border_px) * factor
 
     container = idx.get("saved_container", "npz")
     key = idx.get("saved_key", "arr")
@@ -394,13 +396,15 @@ def stitch_sr_patches(
                                 pass
                     to_delete.clear()
 
+    if missing_count:
+        raise RuntimeError(f"{missing_count} patch files were missing and could not be stitched.")
+
     # 4) rename placeholder -> final
-    sr_path = image_meta["placeholder_path"].replace("sr_placeholder.tif", "sr.tif")
+    sr_path = getattr(self, "final_sr_path", None) or image_meta["placeholder_path"].replace("sr_placeholder.tif", "sr.tif")
     os.replace(image_meta["placeholder_path"], sr_path)
+    self.final_sr_path = sr_path
 
     self._log(f"🧩 Stitched {len(entries)} tiles into: {sr_path}")
-    if missing_count > 0:
-        self._log(f"⚠️ {missing_count} patch files were missing and could not be stitched.")
 
     return sr_path, missing_count
 
@@ -494,16 +498,15 @@ def ddp_safe_stitch(
     out = None
     if is_rank0:
         placeholder = self.placeholder_filepath
-        sr_path = placeholder.replace("sr_placeholder.tif", "sr.tif")
+        sr_path = getattr(self, "final_sr_path", None) or placeholder.replace("sr_placeholder.tif", "sr.tif")
         self.final_sr_path = sr_path
 
         # --- overwrite logic ---
         if os.path.exists(sr_path):
+            if not getattr(self, "overwrite", False):
+                raise FileExistsError(f"Output already exists at {sr_path}. Pass overwrite=True to replace it.")
             self._log(f"⚠️ Existing output found at {sr_path} — will be overwritten.")
-            try:
-                os.remove(sr_path)
-            except OSError:
-                pass
+            os.remove(sr_path)
 
         out = stitch_sr_patches(
             self,

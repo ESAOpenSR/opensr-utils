@@ -1,4 +1,3 @@
-from typing import Tuple
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -131,22 +130,8 @@ def crop_and_save_georeferenced_excerpt(
     crop = data[:, top:top+crop_h, left:left+crop_w]
 
     self._log(f"✅ Saved georeferenced example SR patch of size {crop.shape} to {out_tif}")
+    return crop
 
 
 if __name__ == "__main__":
-
-    tif_path = "/data2/simon/mosaic/Q10_20240701_20240930_Global-S2GM-m36p8_STD_v2.0.5/S2GM_Q10_20240701_20240930_Global-S2GM-m36p8_STD_v2.0.5/tile_0/sr.tif"
-    #tif_path = "/data2/simon/mosaic/individual_tile/sr.tif"
-
-    crop_and_save_georeferenced_excerpt(
-    tif_path=tif_path,
-    out_tif="cropped_excerpt.tif",
-    random_crop_size=(512, 512)
-    )
-    
-    generate_side_by_side_previews(
-    tif_path=tif_path,
-    out_dir="playground/examples",
-    num_examples=10
-    )
-
+    raise SystemExit("Import this module and call its preview helpers from a pipeline run.")

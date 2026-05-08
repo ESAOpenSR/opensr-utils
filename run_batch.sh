@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # ================== CONFIG ==================
-REPO_ROOT="/data1/simon/GitHub/opensr-utils"   # repo root (for PYTHONPATH if not installed)
-DIR="/data2/simon/1msqkm/deep/tiles/"            # folder with inputs
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+DIR="${DIR:-/path/to/inputs}"
 EXT="zip"                                      # file extension to process
 
 PYTHON="python"                                # interpreter
@@ -46,7 +46,7 @@ def main():
     model = get_ldsrs2(device=device)
     gpus = gpu_ids if (device == "cuda" and gpu_ids) else None
 
-    _ = large_file_processing(
+    runner = large_file_processing(
         root=str(Path(root).resolve()),
         model=model,
         window_size=ws,
@@ -57,7 +57,9 @@ def main():
         gpus=gpus,
         save_preview=save_preview,
         debug=debug,
+        overwrite=os.environ.get("SR_OVERWRITE","0") == "1",
     )
+    runner.run()
 
 if __name__ == "__main__":
     try:
