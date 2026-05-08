@@ -9,7 +9,7 @@
 - Functionalities coming in the future:
 	- [x] Input many tiles at once
 	- [x] Pass more file types
-	- [ ] Run SR for a selectable amount of bands
+	- [x] Run SR for a selectable amount of bands
     
 # Description  
 This package performs super-resolution with any PyTorch or PyTorch lighning model for the Sentinel-2 10m bands (R-G-B-NIR).  
