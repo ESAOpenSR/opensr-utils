@@ -15,6 +15,9 @@ def install_fake_pipeline(monkeypatch, calls):
         def __init__(self, **kwargs):
             calls.append(("init", kwargs))
 
+        def close(self):
+            pass
+
         def run(self):
             calls.append(("run", None))
             return "sr.tif"
@@ -60,7 +63,7 @@ def test_cli_runs_placeholder_model_with_cpu_defaults(monkeypatch, capsys):
     assert kwargs["cleanup"] is False
     assert kwargs["compressed_patches"] is True
     assert calls[-1] == ("run", None)
-    assert "Using interpolation placeholder" in capsys.readouterr().out
+    assert "sr.tif" in capsys.readouterr().out
 
 
 def test_cli_loads_ldsrs2_model_and_passes_cuda_gpus(monkeypatch):
@@ -96,6 +99,56 @@ def test_cli_loads_ldsrs2_model_and_passes_cuda_gpus(monkeypatch):
     assert kwargs["delete_input_zip"] is True
 
 
+@pytest.mark.parametrize(
+    "name,canonical", [("sen2sr", "SEN2SR"), ("SRGAN", "ESASRGAN")]
+)
+def test_cli_named_models_use_local_artifacts_and_declared_contract(
+    monkeypatch, name, canonical
+):
+    calls = []
+    install_fake_pipeline(monkeypatch, calls)
+    registry = types.ModuleType("opensr_utils.model_utils.get_models")
+    model = types.SimpleNamespace(factor=4, output_units="normalized")
+    loads = []
+    registry.get_model = lambda *args, **kwargs: loads.append((args, kwargs)) or model
+    monkeypatch.setitem(sys.modules, "opensr_utils.model_utils.get_models", registry)
+    cli.main(
+        [
+            "input.tif",
+            name,
+            "--checkpoint",
+            "local-weights",
+            "--no-download",
+            "--bands",
+            "3",
+            "2",
+            "1",
+            "4",
+            "--device",
+            "cpu",
+        ]
+    )
+    assert loads == [
+        (
+            (canonical,),
+            dict(
+                device="cpu",
+                checkpoint="local-weights",
+                config=None,
+                cache_dir=None,
+                variant=None,
+                download=False,
+            ),
+        )
+    ]
+    options = calls[0][1]
+    assert options["model"] is model
+    assert options["factor"] == 4
+    assert options["output_units"] == "normalized"
+    assert options["band_indexes"] == [3, 2, 1, 4]
+    assert calls[-1] == ("run", None)
+
+
 def test_cli_returns_when_ldsrs2_model_load_fails(monkeypatch, capsys):
     calls = []
     install_fake_pipeline(monkeypatch, calls)
@@ -108,10 +161,11 @@ def test_cli_returns_when_ldsrs2_model_load_fails(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "opensr_utils.model_utils.get_models", get_models)
     monkeypatch.setattr(sys, "argv", ["opensr-run", "/data/input.tif", "LDSRS2"])
 
-    cli.main()
-
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 1
     assert calls == []
-    output = capsys.readouterr().out
+    output = capsys.readouterr().err
     assert "Could not load LDSR-S2 model" in output
     assert "download failed" in output
 
@@ -120,7 +174,6 @@ def test_cli_returns_when_ldsrs2_model_load_fails(monkeypatch, capsys):
     "argv",
     [
         [],
-        ["input.tif"],
         ["input.tif", "unknown"],
         ["input.tif", "None", "--device", "tpu"],
         ["input.tif", "None", "--window_size", "8"],
@@ -195,7 +248,9 @@ def test_cli_passes_all_explicit_processing_options_and_runs_once(monkeypatch):
         window_size=(16, 24),
         overlap=6,
         eliminate_border_px=2,
-        device="cpu",
+        device="auto",
+        output_path=None,
+        output_units="normalized",
         gpus=None,
         batch_size=7,
         num_workers=3,
@@ -219,14 +274,11 @@ def test_cli_propagates_pipeline_errors(monkeypatch):
 
     monkeypatch.setattr(module, "large_file_processing", fail)
     monkeypatch.setattr(sys, "argv", ["opensr-run", "input.tif", "None"])
-    with pytest.raises(FileExistsError):
+    with pytest.raises(SystemExit) as exc:
         cli.main()
+    assert exc.value.code == 1
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="CLI returns success when model loading fails", raises=pytest.fail.Exception
-)
 def test_model_loading_failure_returns_nonzero_exit_status(monkeypatch):
     install_fake_pipeline(monkeypatch, [])
     get_models = types.ModuleType("opensr_utils.model_utils.get_models")
@@ -240,3 +292,68 @@ def test_model_loading_failure_returns_nonzero_exit_status(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code != 0
+
+
+def test_cli_minimal_call_and_output_destination(monkeypatch, capsys):
+    calls = []
+    install_fake_pipeline(monkeypatch, calls)
+    monkeypatch.setattr(
+        sys, "argv", ["opensr-run", "input.tif", "-o", "results/output.tif"]
+    )
+    cli.main()
+    options = calls[0][1]
+    assert options["model"] is None
+    assert options["device"] == "auto"
+    assert options["output_path"] == "results/output.tif"
+    assert "sr.tif" in capsys.readouterr().out
+
+
+@pytest.mark.integration
+def test_cli_real_inference_retains_all_patches_and_writes_explicit_destination(
+    write_raster, tmp_path
+):
+    import json
+    import os
+    from pathlib import Path
+    import subprocess
+
+    import numpy as np
+    import rasterio
+
+    data = np.arange(256, dtype=np.uint16).reshape(1, 16, 16)
+    source = write_raster(tmp_path / "input.tif", data=data, nodata=None)
+    output = tmp_path / "results" / "output.tif"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "opensr_utils",
+            str(source),
+            "-o",
+            str(output),
+            "--device",
+            "cpu",
+            "--factor",
+            "1",
+            "--window-size",
+            "2",
+            "2",
+            "--overlap",
+            "0",
+            "--batch-size",
+            "7",
+            "--keep-temp",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=45,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().splitlines()[-1] == str(output)
+    with rasterio.open(output) as result:
+        np.testing.assert_allclose(result.read(), data, atol=1, rtol=0)
+    (manifest,) = output.parent.glob("temp_*/index.json")
+    entries = json.loads(manifest.read_text())["entries"]
+    assert len(entries) == 64
+    assert all(Path(entry["path"]).is_file() for entry in entries)

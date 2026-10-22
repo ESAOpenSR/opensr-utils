@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import rasterio
 from rasterio.transform import from_origin
 
 
@@ -40,7 +41,47 @@ def test_common_bands_have_rgb_nir_labels_and_values(spectral_scene, pipeline_fa
     assert runner.image_meta["bands"] == 4
     assert set(runner.image_meta["lr_file_dict"]) == {"R", "G", "B", "NIR"}
     np.testing.assert_allclose(
-        runner.datamodule.dataset[0]["image"][:, 0, 0], [0.4, 0.3, 0.2, 0.8]
+        runner.datamodule.dataset[0]["image"][:, 0, 0],
+        [0.4, 0.3, 0.2, 0.8],
+        atol=0.01,
+    )
+
+
+def test_safe_discovery_reads_real_jpeg2000_bands(tmp_path, pipeline_factory):
+    """Exercise the JP2OpenJPEG decoder, rather than a GeoTIFF with a .jp2 name."""
+    with rasterio.Env() as env:
+        if "JP2OpenJPEG" not in env.drivers():
+            pytest.skip("Rasterio was built without JP2OpenJPEG support")
+
+    root = tmp_path / "real.SAFE"
+    img_data = root / "GRANULE" / "L2A_TEST" / "IMG_DATA" / "R10m"
+    img_data.mkdir(parents=True)
+    transform = from_origin(0, 16, 1, 1)
+    values = {"B02": 2000, "B03": 3000, "B04": 4000, "B08": 8000}
+    for band, value in values.items():
+        path = img_data / f"T_TEST_{band}_10m.jp2"
+        with rasterio.open(
+            path,
+            "w",
+            driver="JP2OpenJPEG",
+            width=16,
+            height=16,
+            count=1,
+            dtype="uint16",
+            crs="EPSG:4326",
+            transform=transform,
+        ) as dst:
+            dst.write(np.full((1, 16, 16), value, dtype=np.uint16))
+
+    runner = pipeline_factory(root)
+    assert runner.image_meta["bands"] == 4
+    for path in runner.image_meta["lr_file_dict"].values():
+        with rasterio.open(path) as src:
+            assert src.driver == "JP2OpenJPEG"
+    np.testing.assert_allclose(
+        runner.datamodule.dataset[0]["image"][:, 0, 0],
+        [0.4, 0.3, 0.2, 0.8],
+        atol=0.01,
     )
 
 
@@ -103,11 +144,6 @@ def test_safe_without_usable_bands_has_a_clear_error(tmp_path, pipeline_factory)
         pipeline_factory(root)
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="S2GM auxiliary-only input leaks StopIteration instead of a useful error",
-    raises=StopIteration,
-)
 def test_s2gm_without_usable_bands_has_a_clear_error(
     tmp_path, write_raster, pipeline_factory
 ):
@@ -117,11 +153,6 @@ def test_s2gm_without_usable_bands_has_a_clear_error(
         pipeline_factory(root)
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="Band grid validation currently checks dimensions only",
-    raises=pytest.fail.Exception,
-)
 @pytest.mark.parametrize("mismatch", ["transform", "crs"])
 def test_same_size_bands_on_different_grids_are_rejected(
     spectral_scene, mismatch, write_raster, pipeline_factory

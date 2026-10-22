@@ -1,17 +1,17 @@
 # -*- coding: utf-8 -*-
 
 
-# torch stuff
+"""Windowed inference with disk-backed blending and atomic output publication."""
+
 import torch
 from pytorch_lightning import LightningModule
-
-torch.set_float32_matmul_precision("medium")
 
 # general imports
 import os
 import shutil
 import json
 from datetime import datetime
+from pathlib import Path
 
 # Geo
 import rasterio
@@ -23,92 +23,41 @@ from opensr_utils.model_utils.prepare_model import preprocess_model
 
 
 class large_file_processing:
-    """
-    Large-scale super-resolution pipeline for Sentinel-2 and other geospatial inputs.
+    """Prepare and execute memory-bounded super-resolution of geospatial inputs.
 
-    This class orchestrates the full workflow for processing large raster datasets
-    (e.g. Sentinel-2 SAFE archives, S2GM folders, or standalone GeoTIFFs) with a
-    super-resolution (SR) model. It handles input validation, directory setup,
-    patch-based inference, distributed (DDP) support, and final stitched outputs.
+    Accept a raster, SAFE directory/ZIP or S2GM folder and a PyTorch/Lightning
+    model (or ``None`` for bilinear interpolation). Construction discovers input,
+    validates grids and prepares inference; call :meth:`run` to create a product,
+    or use :func:`opensr_utils.super_resolve` for the one-call workflow.
 
-    Workflow
-    --------
-    1. **Validate input and arguments**
-        - Checks existence of `root`, model type, overlap/border settings, SR factor.
-    2. **Detect input type**
-        - Supports raster file, `.SAFE` folder, `S2GM` folder, or zipped SAFE archive.
-        - If zipped, unzips and updates `self.root`.
-    3. **Create directories**
-        - Sets up `logs/`, `temp/` next to the input for intermediate files.
-    4. **Extract image metadata**
-        - Reads size, CRS, transforms, and computes sliding-window coordinates.
-    5. **Prepare dynamic output metadata**
-        - Defers placeholder creation until prediction metadata is available.
-    6. **Initialize datamodule**
-        - Builds a PyTorch Lightning DataModule for batched inference windows.
-    7. **Preprocess model**
-        - Places model on correct device, switches to eval mode, prepares for inference.
-    8. **Run super-resolution**
-        - If not in debug mode, runs patch-based inference and saves results in `temp/`.
-    9. **Create placeholder and stitch patches into final output**
-        - On rank 0 only: creates a placeholder matching the actual prediction
-          factor/band count, then stitches patches into `final_sr_path`.
-        10. **Cleanup and previews**
-        - Deletes temporary LR patches.
-        - Optionally saves example crops and preview images in `logs/`.
+    Windows are ``(width, height)`` in LR pixels. ``factor`` is a positive integer;
+    overlap and discarded borders are also in LR pixels. Batches stream to disk
+    and overlapping predictions blend through disk-backed float32 accumulators.
+    Plain PyTorch modules and Lightning modules both support batching and DDP.
 
-    Parameters
-    ----------
-    root : str
-        Path to input (SAFE folder, S2GM folder, single raster, or Copernicus zip).
-    model : torch.nn.Module | LightningModule | None, default=None
-        Super-resolution model to use. If `None`, runs in a placeholder/no-model mode.
-    window_size : tuple[int, int], default=(128, 128)
-        Spatial size of low-resolution windows (before SR).
-    factor : int, default=4
-        Super-resolution upscaling factor. Any positive integer is accepted;
-        use ``1`` for tiled inference with models that preserve resolution.
-    overlap : int, default=8
-        Overlap (in LR pixels) between adjacent windows. Must be even.
-    eliminate_border_px : int, default=0
-        Number of border pixels to discard per window in the SR output.
-        Must be even; if overlap is non-zero, must be smaller than `overlap`.
-    device : {"cpu","cuda"}, default="cpu"
-        Device on which to run the model.
-    gpus : int | list[int] | None, default=1
-        GPU index or list of GPU indices. If `device="cpu"`, ignored.
-    save_preview : bool, default=False
-        If True, saves 1 cropped SR excerpt and 10 side-by-side LR/SR previews.
-    debug : bool, default=False
-        If True, processes only 100 windows globally (DDP-safe).
+    ``device="auto"`` chooses CUDA when available, otherwise CPU. ``gpus`` selects
+    CUDA IDs; ``batch_size``, ``num_workers``, ``prefetch_factor`` and
+    ``compressed_patches`` allow throughput/storage tuning. Models load on CPU
+    before Lightning places them on their execution devices.
 
-    Attributes (after init)
-    -----------------------
-    root : str
-        Final resolved input path (after unzip if necessary).
-    input_type : str
-        One of {"file","SAFE","S2GM"}.
-    placeholder_path : str
-        Base folder containing logs/temp/sr.
-    log_dir : str
-        Path to the logs directory.
-    temp_folder : str
-        Path to temporary patch storage.
-    output_dir : str
-        Path to SR output directory.
-    image_meta : dict
-        Metadata such as CRS, transforms, dimensions, and window layout.
-    model : torch.nn.Module | LightningModule
-        Preprocessed model in eval mode.
-    final_sr_path : str
-        Path to the stitched super-resolved GeoTIFF (set after stitching).
+    Model inputs are normalized to [0,1]. ``output_units="normalized"`` scales
+    predictions by 10000; ``"reflectance"`` accepts existing [0,10000] values.
+    Nonfinite outputs are errors; finite outputs are clipped, rounded and saved
+    as uint16. The output's internal validity mask preserves input masks and
+    nodata independently of predicted values, including valid zeros.
 
-    Notes
-    -----
-    - Designed for multi-GPU environments with PyTorch Lightning (DDP).
-    - Uses weighted overlap blending to avoid patch seams.
-    - On rank 0, the stitched result is written to disk and previews are saved.
-    - Non-rank0 processes perform inference only, without logging or stitching.
+    ``output_path`` names a destination GeoTIFF; the default is ``sr.tif`` beside
+    the input (inside S2GM folders). Source rasters cannot be destinations.
+    Existing outputs require ``overwrite=True`` and are atomically replaced only
+    after full coverage and mask validation. ``cleanup=False`` keeps every patch
+    and the manifest. Failed runs retain diagnostics. Source ZIP deletion always
+    requires ``delete_input_zip=True`` and successful input validation.
+
+    ``debug=True`` infers at most 100 windows, retains patches and returns the
+    manifest path without publishing a final raster. ``save_preview=True`` adds
+    preview images/crops. Use this object as a context manager or call ``close``
+    to release cached raster handles. ``auto_run`` exists for legacy callers;
+    explicit ``run`` is the default.
     """
 
     def __init__(
@@ -116,10 +65,10 @@ class large_file_processing:
         root: str,
         model=None,
         window_size: tuple = (128, 128),
-        factor: int = 4,
+        factor=None,
         overlap: int = 8,
         eliminate_border_px=0,
-        device: str = "cpu",
+        device: str = "auto",
         gpus=None,
         save_preview: bool = False,
         debug=False,
@@ -128,34 +77,53 @@ class large_file_processing:
         overwrite: bool = False,
         delete_input_zip: bool = False,
         batch_size: int = 16,
-        num_workers: int = 4,
+        num_workers: int = 0,
         prefetch_factor: int = 2,
         compressed_patches: bool = False,
+        output_path=None,
+        output_units=None,
+        checkpoint=None,
+        model_config=None,
+        cache_dir=None,
+        model_variant=None,
+        download: bool = True,
+        band_indexes=None,
     ):
         # 1) Validate public inputs. Do not use assert: optimized Python removes it.
+        if isinstance(model, str):
+            from opensr_utils.model_utils.get_models import normalize_model_name
+
+            model = normalize_model_name(model)
         if model is not None and not isinstance(
-            model, (LightningModule, torch.nn.Module)
+            model, (str, LightningModule, torch.nn.Module)
         ):
             raise TypeError("Model must be a PyTorch module, LightningModule, or None.")
         if not isinstance(window_size, (tuple, list)) or len(window_size) != 2:
             raise TypeError(
                 "window_size must be a tuple/list of two positive integers."
             )
-        if not all(isinstance(v, int) and v > 0 for v in window_size):
+        if not all(
+            isinstance(v, int) and not isinstance(v, bool) and v > 0
+            for v in window_size
+        ):
             raise ValueError("window_size must contain two positive integers.")
-        if not isinstance(overlap, int) or overlap < 0 or overlap % 2 != 0:
+        if (
+            isinstance(overlap, bool)
+            or not isinstance(overlap, int)
+            or overlap < 0
+            or overlap % 2 != 0
+        ):
             raise ValueError("overlap must be a non-negative even integer.")
         if (
             not isinstance(eliminate_border_px, int)
+            or isinstance(eliminate_border_px, bool)
             or eliminate_border_px < 0
             or eliminate_border_px % 2 != 0
         ):
             raise ValueError("eliminate_border_px must be a non-negative even integer.")
         if overlap == 0:
             if eliminate_border_px != 0:
-                raise ValueError(
-                    "eliminate_border_px must be 0 when overlap is 0."
-                )
+                raise ValueError("eliminate_border_px must be 0 when overlap is 0.")
         elif eliminate_border_px >= overlap:
             raise ValueError("eliminate_border_px must be smaller than overlap.")
         if overlap > 0 and (overlap - eliminate_border_px) < 4:
@@ -164,30 +132,77 @@ class large_file_processing:
             )
         if overlap >= min(window_size):
             raise ValueError("overlap must be smaller than both window dimensions.")
+        explicit_factor = factor is not None
+        if factor is None:
+            factor = getattr(model, "factor", 4)
         if not isinstance(factor, int) or isinstance(factor, bool) or factor <= 0:
             raise ValueError("factor must be a positive integer.")
-        if device not in ("cpu", "cuda"):
-            raise ValueError("device must be 'cpu' or 'cuda'.")
+        if device not in ("auto", "cpu", "cuda"):
+            raise ValueError("device must be 'auto', 'cpu' or 'cuda'.")
+        if output_units not in (None, "normalized", "reflectance"):
+            raise ValueError("output_units must be 'normalized' or 'reflectance'.")
         for name, value in {
             "batch_size": batch_size,
             "num_workers": num_workers,
             "prefetch_factor": prefetch_factor,
         }.items():
-            if not isinstance(value, int) or value < 0:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer.")
         if batch_size == 0:
             raise ValueError("batch_size must be greater than zero.")
+        if num_workers and prefetch_factor == 0:
+            raise ValueError(
+                "prefetch_factor must be greater than zero when num_workers > 0."
+            )
+
+        self.output_path = (
+            str(Path(output_path).expanduser().resolve())
+            if output_path is not None
+            else None
+        )
+        if self.output_path and Path(self.output_path).suffix.lower() not in (
+            ".tif",
+            ".tiff",
+        ):
+            raise ValueError("output_path must name a .tif or .tiff file.")
+        self.output_units = output_units
+        if band_indexes is not None:
+            if (
+                not isinstance(band_indexes, (list, tuple))
+                or not band_indexes
+                or any(
+                    isinstance(index, bool) or not isinstance(index, int) or index <= 0
+                    for index in band_indexes
+                )
+                or len(set(band_indexes)) != len(band_indexes)
+            ):
+                raise ValueError(
+                    "band_indexes must be unique positive 1-based raster band indexes."
+                )
+            band_indexes = list(band_indexes)
+        self._requested_band_indexes = band_indexes
+        if not isinstance(model, str) and any(
+            value is not None
+            for value in (checkpoint, model_config, cache_dir, model_variant)
+        ):
+            raise ValueError(
+                "Checkpoint/config/cache/variant options require a named model; pass an already loaded module without loader options."
+            )
 
         # General Settings
         self.debug = bool(
             debug
         )  # if True, only process 100 windows globally (DDP-safe)
-        self.root = root  # path to folder containing S2 SAFE data format
+        self.root = str(Path(root).expanduser())
         self.window_size = tuple(window_size)  # window size of the LR image
         self.factor = int(factor)  # sr factor of the model
         self.overlap = overlap  # overlap in px of the LR image windows
         self.eliminate_border_px = eliminate_border_px  # border pixels to eliminate in px on each side of the SR image
-        self.device = device  # device to run model on
+        self.device = (
+            ("cuda" if torch.cuda.is_available() else "cpu")
+            if device == "auto"
+            else device
+        )
         self.save_preview = bool(save_preview)
         self.cleanup = bool(cleanup)
         self.overwrite = bool(overwrite)
@@ -197,6 +212,13 @@ class large_file_processing:
         self.prefetch_factor = int(prefetch_factor)
         self.compressed_patches = bool(compressed_patches)
         existing_run_id = os.environ.get("OPENSR_RUN_ID")
+        distributed = torch.distributed
+        active_group = distributed.is_available() and distributed.is_initialized()
+        self._external_world = (
+            distributed.get_world_size()
+            if active_group
+            else int(os.environ.get("WORLD_SIZE", "1"))
+        )
         launcher_env = (
             os.environ.get("WORLD_SIZE", "1") not in ("", "1")
             or os.environ.get("LOCAL_RANK") is not None
@@ -206,6 +228,15 @@ class large_file_processing:
             self.run_id = existing_run_id
         else:
             self.run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{os.getpid()}"
+            if active_group:
+                shared_id = [self.run_id if distributed.get_rank() == 0 else None]
+                distributed.broadcast_object_list(shared_id, src=0)
+                self.run_id = shared_id[0]
+            elif self._external_world > 1:
+                raise ValueError(
+                    "External distributed launches require a unique OPENSR_RUN_ID shared by all ranks. "
+                    "Alternatively, let the pipeline launch workers with gpus=[0, 1]."
+                )
             os.environ["OPENSR_RUN_ID"] = self.run_id
         if isinstance(gpus, int):  # pass GPU/s to Trainer as list
             self.gpus = [gpus]  # number of gpus or list of gpu ids to use
@@ -215,14 +246,20 @@ class large_file_processing:
             self.gpus = list(gpus)
         else:
             raise TypeError("gpus must be None, an int, or a list/tuple of ints.")
-        if self.gpus is not None and not all(
-            isinstance(g, int) and g >= 0 for g in self.gpus
+        if self.gpus is not None and (
+            not self.gpus
+            or not all(
+                isinstance(g, int) and not isinstance(g, bool) and g >= 0
+                for g in self.gpus
+            )
+            or len(set(self.gpus)) != len(self.gpus)
         ):
-            raise ValueError("gpus must contain non-negative integer GPU ids.")
+            raise ValueError("gpus must contain unique non-negative integer GPU ids.")
         if self.device == "cpu":
             self.gpus = None
         elif self.gpus is None:
-            self.gpus = [0]
+            local_world = int(os.environ.get("LOCAL_WORLD_SIZE", "1"))
+            self.gpus = list(range(local_world)) if self._external_world > 1 else [0]
 
         # 3) Locals/init-only (no paths derived yet!) - leave empty
         self.image_meta = {}
@@ -246,8 +283,34 @@ class large_file_processing:
         # Get Image information based on input, including image coordinate windows
         self.get_image_meta(self.root)  # multi-GPU safe
 
-        # Create Datamodule based on input files and Windows
-        self.create_datamodule()  # Runs on all Ranks
+        # Load on CPU; Lightning moves the model after selecting its execution strategy.
+        if isinstance(model, str):
+            from opensr_utils.model_utils.get_models import get_model
+
+            model = get_model(
+                model,
+                device="cpu",
+                checkpoint=checkpoint,
+                config=model_config,
+                cache_dir=cache_dir,
+                variant=model_variant,
+                download=download,
+            )
+        model_factor = getattr(model, "factor", None)
+        if model_factor is not None:
+            if explicit_factor and model_factor != self.factor:
+                raise ValueError(
+                    f"The selected model produces factor {model_factor}; requested factor={self.factor}."
+                )
+            self.factor = model_factor
+        model_units = getattr(model, "output_units", None)
+        if model_units and output_units is not None and output_units != model_units:
+            raise ValueError(
+                f"The model returns {model_units} output; use output_units={model_units!r}."
+            )
+        self.output_units = output_units or model_units or "normalized"
+        self._configure_model_input(model)
+        self.create_datamodule()
 
         # Make sure model is useable and in eval mode
         self.model = preprocess_model(
@@ -256,13 +319,116 @@ class large_file_processing:
             temp_folder=self.temp_folder,
             windows=self.image_meta["image_windows"],
             factor=self.factor,
+            output_units=self.output_units,
         )
+
+        # Deletion is opt-in and happens only after source, channel, model and
+        # window contracts have all validated successfully.
+        pending_zip = getattr(self, "_pending_input_zip_delete", None)
+        if pending_zip and self._is_rank0():
+            pending_path = Path(pending_zip)
+            if pending_path.exists():
+                pending_path.unlink()
+                self._log(f"Deleted validated archive: {pending_path.name}")
+            self._pending_input_zip_delete = None
 
         # Print Status
         self._log("📊 Status: Model and Data ready for inference ✅")
 
         if auto_run:
             self.run()
+
+    def _configure_model_input(self, model):
+        """Select declared model bands without changing generic module inputs."""
+        if getattr(model, "input_units", "normalized") != "normalized":
+            raise ValueError(
+                "The pipeline supplies normalized [0,1] inputs. Construct the adapter with input_units='normalized'."
+            )
+        declared_output_bands = getattr(model, "output_band_names", None)
+        if declared_output_bands is not None:
+            if (
+                not isinstance(declared_output_bands, (tuple, list))
+                or not declared_output_bands
+                or any(
+                    not isinstance(name, str) or not name
+                    for name in declared_output_bands
+                )
+            ):
+                raise ValueError(
+                    "Model output_band_names must be a sequence of nonempty band names."
+                )
+            self.image_meta["output_band_names"] = tuple(declared_output_bands)
+        required = tuple(getattr(model, "input_bands", ()))
+        maximum = getattr(model, "max_window_size", None)
+        if maximum is not None:
+            actual = (
+                min(self.window_size[0], self.image_meta["width"]),
+                min(self.window_size[1], self.image_meta["height"]),
+            )
+            if any(size > limit for size, limit in zip(actual, maximum)):
+                raise ValueError(
+                    f"This model accepts windows up to {tuple(maximum)}; requested {actual}. Use window_size={tuple(maximum)}."
+                )
+        aliases = {
+            "R": "B04",
+            "RED": "B04",
+            "G": "B03",
+            "GREEN": "B03",
+            "B": "B02",
+            "BLUE": "B02",
+            "NIR": "B08",
+        }
+        if self.input_type == "file":
+            with rasterio.open(self.root) as source:
+                indexes = self._requested_band_indexes
+                if indexes is not None and max(indexes) > source.count:
+                    raise ValueError(
+                        f"band_indexes requests a channel beyond the raster's {source.count} bands."
+                    )
+                if required and indexes is None:
+                    names = [
+                        aliases.get(
+                            (name or "").strip().upper(), (name or "").strip().upper()
+                        )
+                        for name in source.descriptions
+                    ]
+                    if all(name in names for name in required):
+                        if any(names.count(name) != 1 for name in required):
+                            raise ValueError(
+                                f"Raster band descriptions must uniquely identify {required}."
+                            )
+                        indexes = [names.index(name) + 1 for name in required]
+                    elif source.count != len(required) or any(
+                        name in required for name in names
+                    ):
+                        raise ValueError(
+                            f"Model requires bands {required}. Set GeoTIFF band descriptions or pass band_indexes in that order; unlabeled inputs must contain exactly {len(required)} bands."
+                        )
+                selected_count = len(indexes) if indexes is not None else source.count
+                if required and selected_count != len(required):
+                    raise ValueError(
+                        f"Model requires {len(required)} bands in {required} order; selected {selected_count}."
+                    )
+                self.image_meta["band_indexes"] = indexes
+                self.image_meta["bands"] = selected_count
+            return
+        if self._requested_band_indexes is not None:
+            raise ValueError(
+                "band_indexes is for single raster files; SAFE/S2GM model bands are selected by name."
+            )
+        if required:
+            paths = self.image_meta["lr_file_dict"]
+            by_band = {
+                aliases.get(label.upper(), label.upper()): (label, path)
+                for label, path in paths.items()
+            }
+            missing = [band for band in required if band not in by_band]
+            if missing:
+                raise FileNotFoundError(
+                    f"Model requires missing spectral bands {missing}; available bands: {sorted(by_band)}."
+                )
+            self.image_meta["lr_file_dict"] = dict(by_band[band] for band in required)
+            self.image_meta["bands"] = len(required)
 
     def create_datamodule(self, windows=None):
         """
@@ -271,11 +437,15 @@ class large_file_processing:
         The datamodule wraps the input type, root path, and sliding windows,
         and handles batching for PyTorch Lightning’s predict loop.
         """
+        previous = getattr(self, "datamodule", None)
+        if previous is not None:
+            previous.dataset.close()
         dm = PredictionDataModule(
             input_type=self.input_type,
             root=self.root,
-            windows=windows or self.image_meta["image_windows"],
+            windows=self.image_meta["image_windows"] if windows is None else windows,
             lr_file_dict=self.image_meta["lr_file_dict"],
+            band_indexes=self.image_meta.get("band_indexes"),
             prefetch_factor=self.prefetch_factor,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
@@ -376,6 +546,14 @@ class large_file_processing:
                         src.width == self.image_meta["width"]
                         and src.height == self.image_meta["height"]
                     ):
+                        if (
+                            src.transform != self.image_meta["transform"]
+                            or src.crs != self.image_meta["crs"]
+                        ):
+                            raise ValueError(
+                                "SAFE bands have matching dimensions but are on "
+                                "different grids (transform or CRS mismatch)."
+                            )
                         same_grid[label] = path
             self.image_meta["lr_file_dict"] = same_grid
             self.image_meta["bands"] = len(self.image_meta["lr_file_dict"])
@@ -387,7 +565,7 @@ class large_file_processing:
             tifs = []
             for root, _, files in os.walk(self.root):
                 for f in files:
-                    if f.lower().endswith(".tif"):
+                    if f.lower().endswith((".tif", ".tiff")):
                         tifs.append(os.path.join(root, f))
 
             if not tifs:
@@ -396,7 +574,8 @@ class large_file_processing:
                 )
 
             by_name = {
-                os.path.splitext(os.path.basename(p))[0]: p for p in sorted(tifs)
+                os.path.splitext(os.path.basename(p))[0].upper(): p
+                for p in sorted(tifs)
             }
             lr_file_dict = {}
             for label, band_name in (
@@ -417,6 +596,12 @@ class large_file_processing:
                     lr_file_dict[band_name] = path
             self.image_meta["lr_file_dict"] = lr_file_dict
 
+            if not lr_file_dict:
+                raise FileNotFoundError(
+                    f"No usable S2GM bands found in {self.root}; "
+                    "auxiliary rasters such as AOT/WVP are not spectral bands."
+                )
+
             # Get image properties
             with rasterio.open(
                 next(iter(self.image_meta["lr_file_dict"].values()))
@@ -433,11 +618,40 @@ class large_file_processing:
                         src.width == self.image_meta["width"]
                         and src.height == self.image_meta["height"]
                     ):
+                        if (
+                            src.transform != self.image_meta["transform"]
+                            or src.crs != self.image_meta["crs"]
+                        ):
+                            raise ValueError(
+                                "S2GM bands have matching dimensions but are on "
+                                "different grids (transform or CRS mismatch)."
+                            )
                         same_grid[label] = path
             self.image_meta["lr_file_dict"] = same_grid
             self.image_meta["bands"] = len(self.image_meta["lr_file_dict"])
             if self.image_meta["bands"] <= 0:
                 raise FileNotFoundError("No S2GM bands matched the selected grid size.")
+
+        # Protect every selected source band, including directory inputs.  The
+        # samefile check catches an existing hardlink even when its pathname is
+        # different from the source pathname.
+        requested_output = getattr(self, "output_path", None)
+        if requested_output and self.input_type in {"SAFE", "S2GM"}:
+            output_path = os.path.abspath(os.path.expanduser(str(requested_output)))
+            for source_path in self.image_meta["lr_file_dict"].values():
+                source_path = os.path.abspath(str(source_path))
+                try:
+                    same_file = os.path.samefile(output_path, source_path)
+                except (FileNotFoundError, OSError):
+                    same_file = False
+                if (
+                    os.path.realpath(output_path) == os.path.realpath(source_path)
+                    or same_file
+                ):
+                    raise ValueError(
+                        "Output path must differ from every selected input band; "
+                        "writing in place is not supported."
+                    )
 
         # finally, add image windows to metadata
         self.image_meta["image_windows"] = self.create_image_windows()
@@ -458,22 +672,19 @@ class large_file_processing:
         """
         Create an empty HR GeoTIFF placeholder for stitched SR results.
 
-        - Output path: `<input_dir>/sr_placeholder.tif`.
+        - Uses a run-specific staging path beside the final destination.
         - Only rank 0 creates/writes the file and ensures `temp/` exists.
         - Other ranks wait until the placeholder is readable, then return.
         - Safe on CPU and single-GPU (treated as rank 0).
         """
-        import os, time
-        import rasterio
-        from rasterio.transform import Affine
+        import time
 
         def _is_rank0_env() -> bool:
             # Works before torch.distributed is initialized
-            lr = os.environ.get("LOCAL_RANK", "")
             r = os.environ.get("RANK", "")
             ws = os.environ.get("WORLD_SIZE", "1")
             if ws not in ("", "1"):
-                return (lr in ("", "0")) and (r in ("", "0"))
+                return int(r or os.environ.get("LOCAL_RANK", "0")) == 0
             return True  # single process → rank0
 
         def _placeholder_readable() -> bool:
@@ -515,9 +726,7 @@ class large_file_processing:
             W = int(self.image_meta["width"] * scale)
             H = int(self.image_meta["height"] * scale)
             tr = self.image_meta["transform"]
-            save_transform = Affine(
-                tr.a / scale, tr.b, tr.c, tr.d, tr.e / scale, tr.f
-            )
+            save_transform = tr * Affine.scale(1 / scale)
 
             profile = {
                 "driver": "GTiff",
@@ -536,9 +745,15 @@ class large_file_processing:
                 "nodata": 0,
             }
 
-            # Open with "w" to (re)create atomically from the POV of other ranks
-            with rasterio.open(self.output_file_path, "w", **profile):
-                pass
+            # The private staging path is never a published final product.
+            with rasterio.open(self.output_file_path, "w", **profile) as destination:
+                names = self.image_meta.get("output_band_names")
+                if names is not None:
+                    if len(names) != nb:
+                        raise ValueError(
+                            "Declared output band names do not match the predicted channel count."
+                        )
+                    destination.descriptions = names
 
             self._log(
                 f"💾 Saved empty placeholder SR image at: {self.output_file_path}"
@@ -558,7 +773,7 @@ class large_file_processing:
                 time.sleep(wait_sleep_s)
             # No logging here (avoid concurrent writes); rank 0 logs already.
 
-    def create_image_windows(self):  # Works
+    def create_image_windows(self):
         """
         Generate overlapping rasterio Windows covering the input image.
 
@@ -627,7 +842,7 @@ class large_file_processing:
         cleanup = self.cleanup if cleanup is None else bool(cleanup)
         overwrite = self.overwrite if overwrite is None else bool(overwrite)
 
-        if os.path.exists(self.final_sr_path) and not overwrite:
+        if not debug and os.path.exists(self.final_sr_path) and not overwrite:
             raise FileExistsError(
                 f"Output already exists at {self.final_sr_path}. "
                 "Pass overwrite=True to replace it."
@@ -635,10 +850,18 @@ class large_file_processing:
 
         self.start_super_resolution(debug=debug, save_preview=save_preview)
 
+        if debug:
+            # A truncated run is diagnostic data, never a complete SR product.
+            index_path = os.path.join(self.temp_folder, "index.json")
+            self._log(
+                f"Debug predictions retained in {index_path}; no final raster created."
+            )
+            return index_path
+
         trainer = getattr(self, "trainer", None)
         if self._is_rank0(trainer):
             self._log("🪡 Stitching results into final sr.tif...")
-            self.write_to_file(overwrite=overwrite)
+            self.write_to_file(overwrite=overwrite, cleanup=cleanup)
 
             if cleanup:
                 self.delete_LR_temp()
@@ -670,6 +893,7 @@ class large_file_processing:
                     f"✅ Saved {num_examples} side-by-side preview images to logs folder."
                 )
 
+        self.close()
         self._log("🎉 Processing done! SR process exited.")
         return self.final_sr_path
 
@@ -701,7 +925,8 @@ class large_file_processing:
         self.model._save_progress_preview = bool(save_preview)
 
         # Devices: list[int] or 1 for CPU/single-GPU
-        devices = self.gpus if self.gpus is not None else 1
+        local_world = int(os.environ.get("LOCAL_WORLD_SIZE", str(self._external_world)))
+        devices = self.gpus if self.gpus is not None else local_world
 
         # Build Trainer kwargs robustly across PL versions
         trainer_kwargs = dict(
@@ -715,12 +940,15 @@ class large_file_processing:
         )
 
         # Use DDP only when we truly have >1 CUDA devices
-        if (
+        if self._external_world > 1 or (
             isinstance(devices, (list, tuple))
             and len(devices) > 1
             and self.device == "cuda"
         ):
             trainer_kwargs["strategy"] = "ddp"
+            trainer_kwargs["num_nodes"] = max(
+                1, self._external_world // max(1, local_world)
+            )
 
         # Make sure PL doesn't override our custom sampler
         sig = inspect.signature(Trainer)
@@ -765,7 +993,9 @@ class large_file_processing:
                 f"✅ Prediction complete! SR patches saved in 📂: {self.temp_folder}"
             )
             if debug:
-                self._log("Debug mode was ON → processed only 100 windows.")
+                self._log(
+                    f"Debug mode processed {len(windows_run)} of {len(windows_all)} windows."
+                )
 
     def _prepare_placeholder_from_prediction_index(self, index_path=None):
         """
@@ -816,40 +1046,11 @@ class large_file_processing:
             factor=output_factor,
         )
 
-    def write_to_file(self, index_path=None, limit=None, overwrite=None):
-        """
-        Multi-GPU safe entry point for stitching super-resolved patches.
+    def write_to_file(self, index_path=None, limit=None, overwrite=None, cleanup=None):
+        """Stitch on global rank zero and atomically publish a validated raster.
 
-        This method wraps around ``writing_utils.ddp_safe_stitch`` to ensure that
-        the expensive GeoTIFF write phase is performed only once (on global rank 0),
-        while all other ranks in a distributed run wait at a synchronization barrier.
-        This prevents file corruption and crashes when using PyTorch DDP.
-
-        Behavior by environment:
-        ------------------------
-        - **CPU / single process**: stitches normally.
-        - **Single GPU**: stitches normally (rank 0 is the only rank).
-        - **Multi-GPU (DDP)**: only rank 0 writes to the GeoTIFF, all other ranks
-        return immediately after the barrier.
-
-        Parameters
-        ----------
-        index_path : str, optional
-            Path to ``index.json`` describing all patches. Defaults to
-            ``<temp_folder>/index.json``.
-        limit : int, optional
-            If given, only the first ``limit`` patches are stitched
-            (useful for debugging).
-
-        Notes
-        -----
-        - Actual stitching and file I/O are handled by
-        :func:`opensr_utils.data_utils.writing_utils.ddp_safe_stitch`.
-        - Ensure that the placeholder GeoTIFF has already been created before
-        calling this function.
-        - Environment variables such as ``GDAL_CACHEMAX=256`` and
-        ``GDAL_NUM_THREADS=1`` are recommended for stability when running with
-        multiple processes.
+        Other ranks return immediately. Failed writes retain the previous output,
+        patches and diagnostics; ``cleanup=False`` also retains successful patches.
         """
         from opensr_utils.data_utils.writing_utils import ddp_safe_stitch
 
@@ -861,16 +1062,28 @@ class large_file_processing:
             self,
             index_path=index_path,
             limit=limit,
-            cleanup_every=50,  # tune if RAM pressure
+            cleanup=getattr(self, "cleanup", True)
+            if cleanup is None
+            else bool(cleanup),
             profile="sigmoid",  # "linear"|"sigmoid"|"cosine"
             profile_alpha=6.0,
             gdal_cache_mb=256,
         )
 
+    def close(self):
+        """Release cached raster handles; retained patches and logs stay on disk."""
+        datamodule = getattr(self, "datamodule", None)
+        if datamodule is not None:
+            datamodule.dataset.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
     def _is_rank0(self, trainer=None):
         """Return True only for the process that should print (rank 0)."""
-        import os, torch
-
         # When Trainer exists, trust it
         if trainer is not None and hasattr(trainer, "is_global_zero"):
             return bool(trainer.is_global_zero)
@@ -887,7 +1100,7 @@ class large_file_processing:
         lr = os.environ.get("LOCAL_RANK", "")
         ws = os.environ.get("WORLD_SIZE", "")
         if ws not in ("", "1"):  # multi-process expected
-            return (r in ("", "0")) and (lr in ("", "0"))
+            return int(r or lr or "0") == 0
 
         # Single process
         return True
@@ -937,6 +1150,6 @@ class large_file_processing:
                         f.write(bl_line + "\n")
                     self._log_backlog.clear()
                 f.write(line + "\n")
-        except Exception as e:
+        except OSError:
             # in case file is not writable, keep line in backlog
             self._log_backlog.append(line)

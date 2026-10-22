@@ -1,75 +1,86 @@
 # Behavior tests
 
-These tests define observable contracts for future refactors. They use small
-local rasters, known pixel values and deterministic models rather than pretrained
-weights. HTTP requests through `requests` are blocked by an autouse fixture;
-model-loading tests mock the download/checkpoint boundary. No GPU is required.
+Tests use local rasters, known pixel values and deterministic models. Pretrained
+weights and HTTP access are unnecessary: an autouse fixture blocks `requests`
+network calls, and model-loader tests mock the download/checkpoint boundary.
+Runtime dependencies are required during collection. Fixed maintenance regressions
+run as normal tests, with no expected-failure markers.
 
 ## Run locally
-
-Use a virtual environment with Python and the package's runtime dependencies:
 
 ```bash
 python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -e '.[dev,cog]'
 python -m pytest -q
+python -m ruff check opensr_utils tests examples setup.py demo.py
+python -m ruff format --check opensr_utils tests examples setup.py demo.py
 ```
 
-In the current workspace the prepared environment is `/work/envs/opensr`:
-
-```bash
-/work/envs/opensr/bin/python -m pytest -q
-```
-
-Runtime dependencies are required: collection should fail if they are missing,
-rather than allowing CI to pass by skipping most tests. CI runs the full suite
-on CPU. To select cases:
+The prepared workspace environment is `/work/envs/opensr/bin/python`. The real
+process tests need permission to open local loopback sockets; restricted sandboxes
+must enable local networking for those tests. They do not contact external services.
+CPU/Gloo workers use bounded process-group and process-join timeouts. The Lightning
+check runs in a bounded subprocess with a dynamically selected port.
 
 ```bash
 python -m pytest -m integration -q
-python -m pytest -m 'not integration and not known_bug' -q
-python -m pytest -m known_bug --runxfail -q
-python -m ruff check tests
-python -m ruff format --check tests
+python -m pytest tests/test_distributed.py tests/test_distributed_trainer.py -q
+python -m pytest --cov=opensr_utils --cov-branch --cov-report=term-missing --cov-report=html
 ```
 
-`known_bug` tests define desired behavior that production code does not yet
-provide. They use strict `xfail`: fixing the behavior causes CI to fail until the
-marker is removed. Failure types are constrained to the reproduced defect.
-`--runxfail` disables those markers to expose the actual failures. The defect
-backlog and remaining design decisions are in [TODO.md](../TODO.md).
+CI covers Python 3.9–3.14. Its oldest interpreter uses the constrained versions in
+[constraints-oldest.txt](../.github/constraints-oldest.txt); other jobs use current
+compatible dependencies. CPU PyTorch and real COG dependencies are installed.
+Branch-aware XML coverage reports are uploaded per interpreter. Coverage is used
+to identify missing behavior cases; no arbitrary percentage gate masks the
+importance of individual branches. Child-process execution is validated through
+observable files and process outcomes; its lines may not appear in the parent
+coverage report.
+
+The model tests keep official downloads outside the normal test suite. Adapter
+tests exercise tensor values, batch shapes, tile padding/cropping, normalization,
+ESA histogram-inference delegation, band selection and labeled GeoTIFF output.
+Pretrained smoke runs use the published SEN2SRLite RGBN and ESA RGB-NIR artifacts
+following [the model examples](../examples/README.md). Optional model dependencies
+can be installed with `.[sen2sr]` (Python 3.10+) and `.[srgan]` (Python 3.12–3.14).
 
 ## Contracts and scope
 
-| Area | Contract |
+| Area | Observable contract |
 | --- | --- |
-| Construction | Validate arguments before creating files; inference is explicit by default. |
-| Band selection | Common channels are R/G/B/NIR; preserve additional spectral channels on the selected grid; ignore auxiliary files. |
-| Input values | Read as float32, divide by 10000 and clamp to [0,1]; retain file channel order. |
-| Tiling | Deterministic, unique, bounded windows cover every pixel, including narrow images and final edges. |
-| Sampling/batching | Every index appears exactly once across ranks; never pad distributed inference or drop a final partial batch. |
-| Model execution | Evaluation/inference mode; output channels may differ from input channels; dimensions obey the scale factor. |
-| Patch persistence | NPY and compressed NPZ carry uint16 predictions and manifests with consistent LR/HR coordinates and channel metadata. |
-| Blending | All three profiles handle valid zero values, preserve outer borders and support symmetric horizontal/vertical overlaps. |
-| Output | Preserve CRS and spatial footprint; compare real tiled output against independently calculated expected pixels. |
-| File safety | Protect source data and existing outputs; reject incomplete products; retain diagnostics after failures. |
-| CLI/model loader | Forward options, reject malformed arguments, validate HTTP responses and stop after failed loading stages. |
-| Auxiliary tools | Cold imports avoid loading ML dependencies or writing files; COGs and excerpts retain pixels and spatial metadata. |
+| API and CLI | One-call execution, explicit output destinations, automatic device defaults, nonzero failure status, and handle cleanup. |
+| Construction | Validate arguments before inference; protect source/output collisions and preserve existing outputs. |
+| Discovery | R/G/B/NIR order, auxiliary exclusion, preferred resolution, selected-grid channels, and rejection of spatial mismatches. |
+| Input values | Float32 normalized/clipped values, native file channel order, and zero-filled masked/nonfinite inputs. |
+| Tiling | Unique deterministic windows cover image edges, rectangular/tiny/narrow rasters and every pixel. |
+| Sampling | Every index appears once across ranks; no padded inference samples or dropped partial batches. |
+| Model execution | Evaluation/inference mode, dynamic output channels, explicit units, finite values and complete batch validation. |
+| Persistence | NPY/NPZ uint16 values and manifests with consistent LR/HR offsets, channels and units. |
+| Blending | Linear/sigmoid/cosine weighting, four-way intersections, valid zeros, outer borders and symmetric overlaps. |
+| Spatial output | Correct CRS, full affine footprint including rotation/shear, dimensions and independently calculated pixels. |
+| Masks | Intersect input validity, nearest-neighbor upscaling, internal masks, source nodata metadata and valid zero predictions. |
+| Safety | Atomic publication, failed overwrite preservation, full coverage, retained diagnostics, complete retention and ZIP validation. |
+| Debug | At most 100 retained windows, no final product, and a subsequent exhaustive full run. |
+| Distributed | Real Gloo communication, empty ranks, rank identities, shard/write/merge errors, lost peers and recovery. |
+| Auxiliary tools | Lightweight cold imports, crop georeferencing and real COG conversion/validation. |
 
-The full CPU inference tests use nearest-neighbor models so expected output is
-computed independently with NumPy repeats. A one-DN absolute tolerance accounts
-for float32 weighted accumulation followed by integer casting. Array/layout and
-manifest tests otherwise check exact values or explicit numerical tolerances.
+Full CPU inference tests compare nearest-neighbor models with independent NumPy
+repeats. A one-DN tolerance accounts for weighted float32 accumulation followed by
+integer casting. Other tests use exact values or explicit numerical tolerances.
+Mask tests include partial output blocks larger than 512 pixels, factor-three
+upscaling, differing source masks and nonfinite values.
 
-SAFE discovery fixtures use GeoTIFF payloads with `.jp2` filenames; Rasterio
-detects the actual format. They exercise naming, resolution preference and band
-selection, not JP2 codec support. COG conversion uses the real converter and
-validator. Distributed manifest tests simulate rank state and on-disk shards;
-they do not replace multi-process/GPU testing.
+Most SAFE discovery fixtures store GeoTIFF payloads under SAFE filenames for
+speed. A separate fixture creates and reads actual JP2OpenJPEG bands, verifies
+the driver and tolerates lossy-codec quantization. It skips only when that driver
+is unavailable; other discovery tests still run. The small generated products
+cannot represent every vendor/product-generation variant.
 
-Prefer new tests at public boundaries, using hand-calculated expectations and
-failure-preservation checks. Mock external services and rank/process context;
-keep the raster I/O, models, persistence and stitching real where inexpensive.
-Use `pipeline_factory` / `dataset_factory` for automatic raster-handle cleanup.
-Keep unresolved units, nodata and debug-output choices in the backlog until
-their intended behavior is decided.
+Real Gloo workers and a two-rank CPU Lightning run complement the simulated shard
+unit tests. The optional two-GPU NCCL test skips without suitable hardware. These
+checks do not establish all CUDA-driver or multi-node shared-filesystem behavior.
+
+Prefer tests at public boundaries with hand-calculated expectations and failure
+preservation checks. `pipeline_factory` and `dataset_factory` close raster handles
+automatically. Keep mocks at external boundaries and use real raster I/O, model
+execution, persistence and stitching when inexpensive.

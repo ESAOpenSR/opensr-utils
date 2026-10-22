@@ -82,11 +82,6 @@ def test_tiled_inference_matches_whole_image_and_preserves_georeferencing(
     assert not Path(runner.placeholder_filepath).exists()
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="Upscaling divides affine a/e but leaves rotation/shear b/d unchanged",
-    raises=AssertionError,
-)
 def test_upscaling_rotated_raster_preserves_its_spatial_footprint(
     write_raster, pipeline_factory, tmp_path
 ):
@@ -178,11 +173,6 @@ def test_explicit_overwrite_replaces_old_output_with_readable_result(
         np.testing.assert_array_equal(result.read(), np.full((1, 16, 16), 2000))
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="Stitcher deletes patches every 50 tiles even with cleanup=False",
-    raises=AssertionError,
-)
 def test_keep_temp_preserves_every_prediction_for_reproducibility(
     write_raster, pipeline_factory, tmp_path
 ):

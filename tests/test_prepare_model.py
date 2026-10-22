@@ -47,7 +47,7 @@ def test_get_world_info_prefers_initialized_distributed(monkeypatch):
     assert prepare_model.get_world_info() == (4, 2)
 
 
-def test_get_world_info_uses_cuda_count_without_distributed(monkeypatch):
+def test_visible_gpus_do_not_create_distributed_processes(monkeypatch):
     monkeypatch.setattr(prepare_model.torch.distributed, "is_available", lambda: True)
     monkeypatch.setattr(
         prepare_model.torch.distributed, "is_initialized", lambda: False
@@ -55,7 +55,7 @@ def test_get_world_info_uses_cuda_count_without_distributed(monkeypatch):
     monkeypatch.setattr(prepare_model.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(prepare_model.torch.cuda, "device_count", lambda: 3)
 
-    assert prepare_model.get_world_info() == (3, 0)
+    assert prepare_model.get_world_info() == (1, 0)
 
 
 def test_preprocess_model_uses_placeholder_and_writes_prediction_index(tmp_path):
@@ -279,17 +279,17 @@ def test_prediction_manifest_round_trips_values_coordinates_and_format(
 
 
 @pytest.mark.parametrize(
-    "values,expected",
+    "values,expected,units",
     [
-        ([-0.25, 0, 0.125, 1.25], [0, 0, 1250, 10000]),
-        ([100, 1000, 5000, 12000], [100, 1000, 5000, 10000]),
+        ([-0.25, 0, 0.125, 1.25], [0, 0, 1250, 10000], "normalized"),
+        ([100, 1000, 5000, 12000], [100, 1000, 5000, 10000], "reflectance"),
     ],
 )
 def test_saved_predictions_support_normalized_and_reflectance_outputs(
-    tmp_path, values, expected
+    tmp_path, values, expected, units
 ):
     model = prepare_model.preprocess_model(
-        parent(tmp_path, 1), None, str(tmp_path), [], factor=1
+        parent(tmp_path, 1), None, str(tmp_path), [], factor=1, output_units=units
     )
     model.on_predict_start()
     model.predict_step(
@@ -339,11 +339,6 @@ def test_model_preparation_rejects_invalid_scale_before_writing(tmp_path, factor
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="Non-finite predictions are cast to uint16 rather than rejected",
-    raises=pytest.fail.Exception,
-)
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 def test_nonfinite_model_output_is_rejected_before_saving(tmp_path, value):
     model = prepare_model.preprocess_model(
@@ -355,11 +350,6 @@ def test_nonfinite_model_output_is_rejected_before_saving(tmp_path, value):
     assert not list(tmp_path.glob("*.npy"))
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="A model can silently drop batch samples without validation",
-    raises=pytest.fail.Exception,
-)
 def test_output_batch_size_must_match_input_batch_size(tmp_path):
     class DropsSample(torch.nn.Module):
         def forward(self, x):
@@ -371,6 +361,18 @@ def test_output_batch_size_must_match_input_batch_size(tmp_path):
     model.on_predict_start()
     with pytest.raises(ValueError, match="(?i)batch"):
         model.predict_step(prediction_batch(torch.ones((2, 1, 2, 2))), 0)
+
+
+def test_invalid_later_metadata_record_writes_no_batch_patches(tmp_path):
+    model = prepare_model.preprocess_model(
+        parent(tmp_path), None, str(tmp_path), [], factor=1
+    )
+    model.on_predict_start()
+    batch = prediction_batch(torch.ones((2, 1, 2, 2)))
+    batch["meta"]["height"][1] = 0
+    with pytest.raises(ValueError, match="non-positive height"):
+        model.predict_step(batch, 0)
+    assert not list(tmp_path.glob("*.npy"))
 
 
 def distributed_context(monkeypatch):
@@ -435,3 +437,44 @@ def test_distributed_manifest_merge_handles_empty_mismatched_and_missing_shards(
         with pytest.raises(exception, match=message):
             model.on_predict_end()
         assert not (tmp_path / "index.json").exists()
+
+
+@pytest.mark.parametrize(
+    "units,expected",
+    [
+        ("normalized", [0, 1, 9999, 10000, 10000, 10000, 10000, 10000]),
+        ("reflectance", [0, 0, 1, 1, 1, 10, 10, 10]),
+    ],
+)
+def test_explicit_output_units_have_no_brightness_threshold(tmp_path, units, expected):
+    values = torch.tensor([0, 0.0001, 0.9999, 1, 1.0001, 9.999, 10, 10.001])
+    model = prepare_model.preprocess_model(
+        parent(tmp_path, 1), None, str(tmp_path), [], factor=1, output_units=units
+    )
+    model.on_predict_start()
+    model.predict_step(prediction_batch(values.reshape(1, 1, 2, 4)), 0)
+    model.on_predict_end()
+    manifest = json.loads((tmp_path / "index.json").read_text())
+    assert manifest["output_units"] == units
+    np.testing.assert_array_equal(
+        np.load(manifest["entries"][0]["path"]).ravel(), expected
+    )
+
+
+@pytest.mark.parametrize("metadata", ["lists", "records"])
+@pytest.mark.parametrize("invalid", [0.5, float("nan"), True])
+def test_noninteger_later_offsets_cannot_partially_persist_batch(
+    tmp_path, metadata, invalid
+):
+    model = prepare_model.preprocess_model(
+        parent(tmp_path), None, str(tmp_path), [], factor=1
+    )
+    model.on_predict_start()
+    batch = prediction_batch(torch.ones((2, 1, 2, 2)), metadata=metadata)
+    if metadata == "lists":
+        batch["meta"]["row_off"][1] = invalid
+    else:
+        batch["meta"][1]["row_off"] = invalid
+    with pytest.raises(ValueError, match="integer row_off"):
+        model.predict_step(batch, 0)
+    assert not list(tmp_path.glob("*.npy"))

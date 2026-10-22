@@ -4,6 +4,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import rasterio
 
 
 from opensr_utils.data_utils import reading_utils
@@ -77,10 +78,14 @@ def test_verify_input_file_type_extracts_safe_zip(dummy_runner, tmp_path):
     assert archive.exists()
 
 
-def test_verify_input_file_type_can_delete_zip_after_extract(dummy_runner, tmp_path):
+def test_verify_input_file_type_can_delete_zip_after_extract(
+    dummy_runner, write_raster, tmp_path
+):
+    band = write_raster(tmp_path / "B04.tif")
     archive = tmp_path / "download.zip"
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("S2A_TEST.SAFE/manifest.safe", "")
+        zf.write(band, "S2A_TEST.SAFE/GRANULE/L2A/IMG_DATA/T_TEST_B04_10m.jp2")
     dummy_runner.delete_input_zip = True
 
     reading_utils.verify_input_file_type(dummy_runner, str(archive))
@@ -175,10 +180,14 @@ def test_all_zip_members_are_validated_before_any_extraction(
     assert archive.exists()
 
 
-def test_zip_can_be_reused_after_opt_in_source_deletion(dummy_runner, tmp_path):
+def test_zip_can_be_reused_after_opt_in_source_deletion(
+    dummy_runner, write_raster, tmp_path
+):
+    band = write_raster(tmp_path / "B04.tif")
     archive = tmp_path / "scene.zip"
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("scene.SAFE/manifest.safe", "preserve extracted content")
+        zf.write(band, "scene.SAFE/GRANULE/L2A/IMG_DATA/T_TEST_B04_10m.jp2")
     dummy_runner.delete_input_zip = True
     reading_utils.verify_input_file_type(dummy_runner, archive)
     first_root = dummy_runner.root
@@ -207,11 +216,6 @@ def test_worker_uses_preextracted_safe_without_deleting_source(
     assert archive.exists()
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="delete_input_zip deletes the archive before checking for a SAFE folder",
-    raises=AssertionError,
-)
 def test_zip_without_safe_is_retained_even_when_deletion_was_requested(
     dummy_runner, tmp_path
 ):
@@ -221,6 +225,33 @@ def test_zip_without_safe_is_retained_even_when_deletion_was_requested(
     dummy_runner.delete_input_zip = True
     with pytest.raises(NotImplementedError, match="does not contain"):
         reading_utils.verify_input_file_type(dummy_runner, archive)
+    assert archive.exists()
+
+
+def test_zip_with_empty_safe_is_retained_after_pipeline_validation(
+    tmp_path, pipeline_factory
+):
+    archive = tmp_path / "empty_product.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("empty.SAFE/manifest.safe", "metadata only")
+
+    with pytest.raises(FileNotFoundError, match="No JP2 bands|usable SAFE bands"):
+        pipeline_factory(archive, delete_input_zip=True)
+    assert archive.exists()
+
+
+def test_zip_with_corrupt_safe_band_is_retained_after_pipeline_validation(
+    tmp_path, pipeline_factory
+):
+    archive = tmp_path / "corrupt_product.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(
+            "corrupt.SAFE/GRANULE/L2A/IMG_DATA/T_TEST_B04_10m.jp2",
+            "not a JPEG2000 raster",
+        )
+
+    with pytest.raises(rasterio.errors.RasterioIOError):
+        pipeline_factory(archive, delete_input_zip=True)
     assert archive.exists()
 
 

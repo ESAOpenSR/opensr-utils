@@ -466,7 +466,7 @@ def test_ddp_safe_stitch_overwrites_existing_output_and_calls_stitcher(
     monkeypatch.setattr(writing_utils, "stitch_sr_patches", fake_stitch)
 
     assert writing_utils.ddp_safe_stitch(runner, limit=3) == ("done.tif", 0)
-    assert not final.exists()
+    assert final.read_bytes() == b"existing"
     assert calls[0]["limit"] == 3
 
 
@@ -666,7 +666,7 @@ def test_stitcher_obeys_manifest_scale_container_and_custom_key(
     "coverage,exception",
     [("gap", RuntimeError), ("missing", RuntimeError), ("corrupt", ValueError)],
 )
-def test_failed_stitch_does_not_publish_incomplete_output_and_removes_accumulators(
+def test_failed_stitch_does_not_publish_incomplete_output_and_keeps_diagnostics(
     tmp_path, coverage, exception
 ):
     runner = saved_patch_run(tmp_path, coverage=coverage)
@@ -674,15 +674,11 @@ def test_failed_stitch_does_not_publish_incomplete_output_and_removes_accumulato
         writing_utils.stitch_sr_patches(runner)
     assert not Path(runner.final_sr_path).exists()
     assert Path(runner.placeholder_filepath).exists()
-    assert not list(tmp_path.glob("*.sum.tif"))
-    assert not list(tmp_path.glob("*.weights.tif"))
+    # Failed stitches retain accumulators as diagnostics for inspection.
+    assert list(tmp_path.glob("*.sum.tif"))
+    assert list(tmp_path.glob("*.weights.tif"))
 
 
-@pytest.mark.known_bug
-@pytest.mark.xfail(
-    reason="Overwrite deletes existing final output before validating replacement patches",
-    raises=AssertionError,
-)
 def test_failed_overwrite_keeps_last_successful_output(tmp_path):
     runner = saved_patch_run(tmp_path, coverage="missing")
     runner.overwrite = True
@@ -692,3 +688,84 @@ def test_failed_overwrite_keeps_last_successful_output(tmp_path):
         writing_utils.ddp_safe_stitch(runner)
     assert final.exists()
     assert final.read_bytes() == b"last successful output"
+
+
+def test_partial_limit_does_not_publish_or_replace_existing_output(tmp_path):
+    runner = saved_patch_run(tmp_path)
+    runner.overwrite = True
+    final = Path(runner.final_sr_path)
+    final.write_bytes(b"last successful output")
+
+    with pytest.raises(RuntimeError, match="output pixels were not covered"):
+        writing_utils.ddp_safe_stitch(runner, limit=1)
+
+    assert final.read_bytes() == b"last successful output"
+    assert Path(runner.placeholder_filepath).exists()
+
+
+def test_cleanup_false_retains_manifest_and_every_prediction(tmp_path):
+    runner = saved_patch_run(tmp_path)
+    patch_paths = [
+        Path(entry["path"])
+        for entry in json.loads((tmp_path / "index.json").read_text())["entries"]
+    ]
+
+    writing_utils.stitch_sr_patches(runner, cleanup=False)
+
+    assert (tmp_path / "index.json").exists()
+    assert all(path.exists() for path in patch_paths)
+
+
+def test_concurrent_destination_creation_cannot_bypass_no_overwrite(
+    monkeypatch, tmp_path
+):
+    runner = saved_patch_run(tmp_path)
+    final = Path(runner.final_sr_path)
+    count_uncovered = writing_utils._count_uncovered_pixels
+
+    def concurrent_publication(weights):
+        uncovered = count_uncovered(weights)
+        final.write_bytes(b"another successful run")
+        return uncovered
+
+    monkeypatch.setattr(
+        writing_utils, "_count_uncovered_pixels", concurrent_publication
+    )
+    with pytest.raises(FileExistsError, match="Output already exists"):
+        writing_utils.ddp_safe_stitch(runner)
+    assert final.read_bytes() == b"another successful run"
+    assert Path(runner.placeholder_filepath).exists()
+    assert len(list(tmp_path.glob("patch_*.npy"))) == 2
+
+
+def test_successful_overwrite_removes_stale_external_raster_sidecars(tmp_path):
+    runner = saved_patch_run(tmp_path)
+    runner.overwrite = True
+    final = Path(runner.final_sr_path)
+    make_placeholder(final, width=4, height=2)
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=False):
+        with rasterio.open(final, "r+") as old:
+            old.write_mask(np.zeros((2, 4), dtype=np.uint8))
+    assert Path(str(final) + ".msk").exists()
+    for suffix in (".ovr", ".aux.xml"):
+        Path(str(final) + suffix).write_bytes(b"old raster sidecar")
+
+    writing_utils.ddp_safe_stitch(runner)
+    for suffix in (".msk", ".ovr", ".aux.xml"):
+        assert not Path(str(final) + suffix).exists()
+    with rasterio.open(final) as result:
+        np.testing.assert_array_equal(result.read(1), [[100, 100, 200, 200]] * 2)
+        assert np.all(result.read_masks(1) == 255)
+
+
+def test_failed_overwrite_preserves_previous_raster_sidecars(tmp_path):
+    runner = saved_patch_run(tmp_path, coverage="missing")
+    runner.overwrite = True
+    final = Path(runner.final_sr_path)
+    final.write_bytes(b"previous raster")
+    sidecar = Path(str(final) + ".msk")
+    sidecar.write_bytes(b"previous mask")
+    with pytest.raises(RuntimeError):
+        writing_utils.ddp_safe_stitch(runner)
+    assert final.read_bytes() == b"previous raster"
+    assert sidecar.read_bytes() == b"previous mask"

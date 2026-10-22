@@ -380,29 +380,6 @@ def test_run_refuses_to_overwrite_existing_output(tmp_path):
         runner.run()
 
 
-def test_write_to_file_delegates_to_ddp_safe_stitch(monkeypatch, tmp_path):
-    from opensr_utils.data_utils import writing_utils
-
-    runner = blank_runner()
-    runner.overwrite = False
-    calls = []
-
-    def fake_ddp_safe_stitch(self, **kwargs):
-        calls.append((self, kwargs))
-        return ("out.tif", 0)
-
-    monkeypatch.setattr(writing_utils, "ddp_safe_stitch", fake_ddp_safe_stitch)
-
-    assert runner.write_to_file(
-        index_path=str(tmp_path / "index.json"), limit=2, overwrite=True
-    ) == ("out.tif", 0)
-    assert runner.overwrite is True
-    assert calls[0][0] is runner
-    assert calls[0][1]["index_path"].endswith("index.json")
-    assert calls[0][1]["limit"] == 2
-    assert calls[0][1]["profile"] == "sigmoid"
-
-
 def test_write_to_file_creates_placeholder_from_prediction_index(monkeypatch, tmp_path):
     from opensr_utils.data_utils import writing_utils
 

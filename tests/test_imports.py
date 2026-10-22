@@ -15,6 +15,7 @@ import pytest
         "opensr_utils",
         "opensr_utils.data_utils",
         "opensr_utils.model_utils",
+        "opensr_utils.model_utils.get_models",
         "opensr_utils.cli",
         "opensr_utils.data_utils.transform_to_cog",
     ],
