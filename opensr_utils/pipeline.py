@@ -353,7 +353,9 @@ class large_file_processing:
             used = set(lr_file_dict.values())
             for path in jp2s:
                 if path not in used:
-                    lr_file_dict[safe_band_name(path)] = path
+                    name = safe_band_name(path)
+                    if name.startswith("B") and name[1:].isalnum():
+                        lr_file_dict[name] = path
             if not lr_file_dict:
                 raise FileNotFoundError(f"No usable SAFE bands found in {self.root}.")
 
@@ -407,7 +409,11 @@ class large_file_processing:
                     lr_file_dict[label] = by_name[band_name]
             used = set(lr_file_dict.values())
             for band_name, path in by_name.items():
-                if path not in used:
+                if (
+                    path not in used
+                    and band_name.startswith("B")
+                    and band_name[1:].isalnum()
+                ):
                     lr_file_dict[band_name] = path
             self.image_meta["lr_file_dict"] = lr_file_dict
 

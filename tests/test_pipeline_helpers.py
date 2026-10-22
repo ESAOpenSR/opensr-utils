@@ -438,3 +438,33 @@ def test_write_to_file_creates_placeholder_from_prediction_index(
     with rasterio.open(runner.placeholder_filepath) as src:
         assert (src.width, src.height, src.count) == (9, 6, 2)
         assert src.dtypes == ("uint16", "uint16")
+
+
+def test_safe_band_selection_excludes_auxiliary_rasters(write_raster, tmp_path):
+    safe = tmp_path / "S2A_TEST.SAFE"
+    granule = safe / "GRANULE" / "L1C_TEST" / "IMG_DATA" / "R10m"
+    granule.mkdir(parents=True)
+    for band in ("B02", "B03", "B04", "B08", "AOT", "WVP", "TCI"):
+        write_raster(
+            granule / f"T_TEST_{band}_10m.jp2",
+            data=np.ones((1, 16, 16), dtype=np.uint16),
+            width=16,
+            height=16,
+        )
+    (safe / "manifest.safe").write_text("")
+
+    runner = pipeline.large_file_processing(
+        root=str(safe),
+        model=None,
+        window_size=(8, 8),
+        factor=2,
+        overlap=4,
+        eliminate_border_px=0,
+        device="cpu",
+        batch_size=1,
+        num_workers=0,
+        prefetch_factor=0,
+    )
+
+    assert runner.image_meta["bands"] == 4
+    assert set(runner.image_meta["lr_file_dict"]) == {"R", "G", "B", "NIR"}
