@@ -1,4 +1,4 @@
-# Dependency floor exercised by the Python 3.9 CI job. Keep these pins
+# Dependency floor for local Python 3.9 compatibility checks. Keep these pins
 # together: Torch 2.0 predates NumPy 2's ABI and its Lightning stack has a
 # narrower compatibility range than current releases.
 numpy<2

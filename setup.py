@@ -17,8 +17,8 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     # Keep the public API usable on the long-lived Python 3.9/3.10
-    # environments used by existing ESA processing workflows. Newer CI jobs
-    # exercise the current PyTorch wheels through Python 3.14.
+    # environments used by existing ESA processing workflows. CI exercises
+    # current PyTorch wheels on Python 3.12.
     python_requires=">=3.9",
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -62,7 +62,8 @@ setup(
         "cog": ["rio-cogeo"],
         # Keep coverage tooling in the development extra so local and CI
         # measurements exercise the same dependency set as the test suite.
-        "dev": ["pytest", "pytest-cov", "ruff"],
+        # Pin the reviewed lint/format version so CI and local checks agree.
+        "dev": ["pytest", "pytest-cov", "ruff==0.15.12"],
     },
     entry_points={
         "console_scripts": [

@@ -28,10 +28,9 @@ python -m pytest tests/test_distributed.py tests/test_distributed_trainer.py -q
 python -m pytest --cov=opensr_utils --cov-branch --cov-report=term-missing --cov-report=html
 ```
 
-CI covers Python 3.9–3.14. Its oldest interpreter uses the constrained versions in
-[constraints-oldest.txt](../.github/constraints-oldest.txt); other jobs use current
-compatible dependencies. CPU PyTorch and real COG dependencies are installed.
-Branch-aware XML coverage reports are uploaded per interpreter. Coverage is used
+CI runs on Python 3.12 with current compatible dependencies and a pinned Ruff
+version shared with local development. CPU PyTorch and real COG dependencies are
+installed. A branch-aware XML coverage report is uploaded. Coverage is used
 to identify missing behavior cases; no arbitrary percentage gate masks the
 importance of individual branches. Child-process execution is validated through
 observable files and process outcomes; its lines may not appear in the parent

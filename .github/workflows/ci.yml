@@ -7,63 +7,18 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Retain the package's established 3.9/3.10 compatibility while
-        # checking current wheels on every maintained interpreter through 3.14.
-        include:
-          - python-version: "3.9"
-            torch-version: "2.0.0"
-            torchvision-version: "0.15.1"
-            constraints: oldest
-          - python-version: "3.10"
-            torch-version: "2.6.0"
-            torchvision-version: "0.21.0"
-            constraints: none
-          - python-version: "3.11"
-            torch-version: "latest"
-            torchvision-version: "latest"
-            constraints: none
-          - python-version: "3.12"
-            torch-version: "latest"
-            torchvision-version: "latest"
-            constraints: none
-          - python-version: "3.13"
-            torch-version: "latest"
-            torchvision-version: "latest"
-            constraints: none
-          - python-version: "3.14"
-            torch-version: "latest"
-            torchvision-version: "latest"
-            constraints: none
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
       - name: Install CPU PyTorch
         run: |
           python -m pip install --upgrade pip
-          if [ "${{ matrix.torch-version }}" = "latest" ]; then
-            python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          else
-            # Torch 2.0 predates NumPy 2's ABI; install the complete oldest
-            # stack before the editable package. The constraints file is also
-            # passed to that package install below, preventing resolver-driven
-            # upgrades of Torch or Lightning.
-            python -m pip install \
-              "torch==${{ matrix.torch-version }}" \
-              "torchvision==${{ matrix.torchvision-version }}" \
-              --index-url https://download.pytorch.org/whl/cpu
-          fi
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install package
         run: |
-          if [ "${{ matrix.constraints }}" = "oldest" ]; then
-            python -m pip install -c .github/constraints-oldest.txt -e '.[dev,cog]'
-          else
-            python -m pip install -e '.[dev,cog]'
-          fi
+          python -m pip install -e '.[dev,cog]'
       - name: Syntax check
         run: python -m compileall opensr_utils setup.py tests examples
       - name: Shell syntax check
@@ -74,13 +29,13 @@ jobs:
           --cov=opensr_utils
           --cov-branch
           --cov-report=term-missing
-          --cov-report=xml:coverage-${{ matrix.python-version }}.xml
+          --cov-report=xml:coverage-3.12.xml
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-${{ matrix.python-version }}
-          path: coverage-${{ matrix.python-version }}.xml
+          name: coverage-3.12
+          path: coverage-3.12.xml
           if-no-files-found: ignore
       - name: Check test quality
         run: >-

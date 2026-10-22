@@ -16,13 +16,10 @@ pip install opensr-utils
 pip install 'opensr-utils[model]'
 ```
 
-The CI matrix covers Python **3.9–3.14**, with pinned older PyTorch/Lightning
-stacks and current compatible dependencies. The full suite is also exercised
-locally on Python 3.12 and 3.14. Use `opensr-utils[cog]` for COG conversion and
+CI runs on Python **3.12** with current compatible dependencies. Use
+`opensr-utils[cog]` for COG conversion and
 `opensr-utils[dev,cog]` for development. For current model installations, Python
-**3.12–3.14** supports both SEN2SR and ESA SRGAN. Python 3.15 is not in the tested
-matrix because [released PyTorch wheels](https://pypi.org/project/torch/#files)
-currently cover interpreters only through 3.14.
+**3.12–3.14** supports both SEN2SR and ESA SRGAN.
 
 ## Python usage
 
