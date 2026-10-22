@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_demo_help_is_available_without_model_imports():
     result = subprocess.run(
-        [sys.executable, str(ROOT / "demo.py"), "--help"],
+        [sys.executable, str(ROOT / "examples" / "run_model.py"), "--help"],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -27,7 +27,7 @@ def test_demo_help_is_available_without_model_imports():
 
 
 def test_model_examples_expose_help_without_downloading_weights():
-    for script in ("run_sen2sr.py", "run_esasrgan.py"):
+    for script in ("run_sen2sr.py", "run_esasrgan.py", "run_ldsrs2.py"):
         result = subprocess.run(
             [sys.executable, str(ROOT / "examples" / script), "--help"],
             cwd=ROOT,
@@ -60,7 +60,7 @@ def test_demo_runs_tiny_model_none_workflow(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            str(ROOT / "demo.py"),
+            str(ROOT / "examples" / "run_model.py"),
             str(source),
             "--model",
             "none",
@@ -79,7 +79,7 @@ def test_demo_runs_tiny_model_none_workflow(tmp_path):
 
 
 def test_demo_passes_checkpoint_options_to_model_registry(monkeypatch, tmp_path):
-    import demo
+    from examples import run_model as demo
     import opensr_utils
 
     calls = []
@@ -127,7 +127,7 @@ def test_demo_passes_checkpoint_options_to_model_registry(monkeypatch, tmp_path)
 
 
 def test_demo_translates_cuda_device_selector_to_pipeline_gpu(monkeypatch):
-    import demo
+    from examples import run_model as demo
     import opensr_utils
 
     forwarded = {}
@@ -169,3 +169,68 @@ def test_esasrgan_example_forwards_auto_download_and_cache_options(
             },
         )
     ]
+
+
+def test_sen2sr_example_selects_all_bands_and_ldsr_backbone(monkeypatch, tmp_path):
+    import opensr_utils
+    from examples import run_sen2sr
+    from opensr_utils.model_utils import get_models
+
+    calls = []
+    monkeypatch.setattr(
+        get_models,
+        "get_model",
+        lambda name, **kw: calls.append((name, kw)) or "composite",
+    )
+    forwarded = {}
+    monkeypatch.setattr(
+        opensr_utils, "super_resolve", lambda *a, **kw: forwarded.update(kw) or "result"
+    )
+    assert run_sen2sr.main(["scene.SAFE", "--sampling-steps", "20"]) == 0
+    assert calls[0][1]["variant"] == "main"
+    assert calls[0][1]["backbone"] == "ldsrs2"
+    assert calls[0][1]["sampling_steps"] == 20
+    assert forwarded["resample_inputs"] is True
+    assert forwarded["batch_size"] == 1
+
+
+def test_ldsrs2_example_selects_rgbn_and_forwards_sampling(monkeypatch):
+    import opensr_utils
+    from examples import run_ldsrs2
+    from opensr_utils.model_utils import ldsrs2
+
+    calls = []
+    monkeypatch.setattr(
+        ldsrs2, "load_ldsrs2", lambda **kw: calls.append(kw) or "rgbn-model"
+    )
+    forwarded = {}
+    monkeypatch.setattr(
+        opensr_utils, "super_resolve", lambda *a, **kw: forwarded.update(kw) or "result"
+    )
+    assert (
+        run_ldsrs2.main(
+            ["input.tif", "--bands", "3", "2", "1", "4", "--sampling-steps", "10"]
+        )
+        == 0
+    )
+    assert calls[0]["sampling_steps"] == 10
+    assert forwarded["band_indexes"] == [3, 2, 1, 4]
+
+
+@pytest.mark.parametrize(
+    "script,options",
+    [
+        ("run_sen2sr.py", ["scene.SAFE", "--no-download"]),
+        ("run_sen2sr.py", ["scene.SAFE", "--backbone-config", "config.yaml"]),
+        ("run_ldsrs2.py", ["scene.SAFE", "--no-download"]),
+        ("run_ldsrs2.py", ["scene.SAFE", "--config", "config.yaml"]),
+    ],
+)
+def test_invalid_offline_examples_fail_before_model_loading(script, options):
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "examples" / script), *options],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "requires" in result.stderr or "together" in result.stderr

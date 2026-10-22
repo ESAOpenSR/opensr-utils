@@ -3,6 +3,7 @@ from __future__ import annotations
 import pickle
 
 import pytest
+import rasterio
 
 import numpy as np
 import torch
@@ -229,7 +230,7 @@ def test_dataset_clips_reflectance_and_preserves_spatial_values(
     image = dataset[0]["image"]
     np.testing.assert_allclose(image.numpy(), [[[0, 0, 0.1], [0.5, 1, 1]]])
     assert image.dtype == torch.float32
-    with datamodule.rasterio.open(path) as src:
+    with rasterio.open(path) as src:
         np.testing.assert_array_equal(src.read(1), values)
 
 

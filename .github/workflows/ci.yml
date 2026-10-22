@@ -65,7 +65,7 @@ jobs:
             python -m pip install -e '.[dev,cog]'
           fi
       - name: Syntax check
-        run: python -m compileall opensr_utils setup.py demo.py tests examples
+        run: python -m compileall opensr_utils setup.py tests examples
       - name: Shell syntax check
         run: bash -n run_batch.sh
       - name: Behavior and CPU integration tests
@@ -84,5 +84,5 @@ jobs:
           if-no-files-found: ignore
       - name: Check test quality
         run: >-
-          python -m ruff check opensr_utils tests examples setup.py demo.py
-          && python -m ruff format --check opensr_utils tests examples setup.py demo.py
+          python -m ruff check opensr_utils tests examples setup.py
+          && python -m ruff format --check opensr_utils tests examples setup.py

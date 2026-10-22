@@ -159,3 +159,59 @@ def test_unlabeled_multiband_input_can_select_explicit_rgbn_indexes(
     )
     with rasterio.open(output) as result:
         np.testing.assert_array_equal(result.read()[:, 0, 0], [4000, 3000, 2000, 8000])
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("source_kind", ["SAFE", "S2GM"])
+def test_all_band_native_resolution_products_keep_order_values_and_masks(
+    source_kind, write_raster, tmp_path
+):
+    from rasterio.transform import from_origin
+    from opensr_utils.model_utils.sen2sr import ALL_BANDS
+
+    source = tmp_path / ("tile.SAFE" if source_kind == "SAFE" else "bands")
+    band_dir = (
+        source / "GRANULE" / "tile" / "IMG_DATA" if source_kind == "SAFE" else source
+    )
+    ten_meter = {"B02", "B03", "B04", "B08"}
+    for index, band in enumerate(ALL_BANDS):
+        is_native_10m = band in ten_meter
+        resolution = 10 if is_native_10m else 20
+        shape = (4, 6) if is_native_10m else (2, 3)
+        data = np.full((1, *shape), index * 500, dtype="uint16")
+        if band == "B05":
+            data[0, 1, 1] = 65535
+        filename = (
+            f"TEST_{band}_{resolution}m.jp2" if source_kind == "SAFE" else f"{band}.tif"
+        )
+        write_raster(
+            band_dir / filename,
+            data=data,
+            nodata=65535,
+            transform=from_origin(600000, 5100000, resolution, resolution),
+            crs="EPSG:32632",
+        )
+    if source_kind == "SAFE":
+        # This duplicate must not displace the native 20 m source.
+        write_raster(
+            band_dir / "TEST_B05_60m.jp2",
+            data=np.full((1, 1, 1), 9999),
+            nodata=65535,
+            transform=from_origin(600000, 5100000, 60, 60),
+            crs="EPSG:32632",
+        )
+    model = SEN2SRAdapter(FixedSENTile(), variant="main")
+    output = super_resolve(source, model, device="cpu", resample_inputs=True)
+    valid = np.ones((4, 6), dtype=bool)
+    valid[2:4, 2:4] = False
+    expected_mask = np.repeat(np.repeat(valid, 4, 0), 4, 1)
+    with rasterio.open(output) as result:
+        assert result.count == 10
+        assert result.descriptions == ALL_BANDS
+        assert result.shape == (16, 24)
+        assert result.transform.almost_equals(from_origin(600000, 5100000, 2.5, 2.5))
+        np.testing.assert_array_equal(result.dataset_mask() != 0, expected_mask)
+        for index in range(10):
+            np.testing.assert_array_equal(
+                result.read(index + 1)[expected_mask], index * 500
+            )

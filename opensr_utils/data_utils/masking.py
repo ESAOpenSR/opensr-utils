@@ -11,8 +11,8 @@ from __future__ import annotations
 import math
 from contextlib import ExitStack
 import numpy as np
-import rasterio
 from rasterio.windows import Window
+from .grids import open_input_raster
 
 
 def _source_paths(runner) -> list[str]:
@@ -93,7 +93,10 @@ def apply_input_mask(runner, dst):
 
     paths = _source_paths(runner)
     with ExitStack() as stack:
-        sources = [stack.enter_context(rasterio.open(path)) for path in paths]
+        sources = [
+            stack.enter_context(open_input_raster(path, meta.get("resample_grid")))
+            for path in paths
+        ]
         indexes = None
         if getattr(runner, "input_type", None) == "file":
             indexes = meta.get("band_indexes")

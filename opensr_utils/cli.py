@@ -127,7 +127,9 @@ def main(argv=None):
     )
     parser.add_argument("--cache-dir", help="Model download/cache directory")
     parser.add_argument(
-        "--variant", "--model-variant", help="SEN2SR RGBN variant (lite)"
+        "--variant",
+        "--model-variant",
+        help="SEN2SR variant: lite (RGBN) or main (ten bands)",
     )
     parser.add_argument(
         "--no-download",

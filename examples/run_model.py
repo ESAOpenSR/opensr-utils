@@ -3,12 +3,12 @@
 
 Examples::
 
-    python demo.py scene.tif --model none --factor 1 --output scene_sr.tif
-    python demo.py scene.SAFE.zip --model sen2sr --checkpoint weights.ckpt
-    python demo.py scene.tif --model esasrgan --device cuda --batch-size 8
+    python examples/run_model.py scene.tif --model none --factor 1 --output scene_sr.tif
+    python examples/run_model.py scene.SAFE.zip --model sen2sr --checkpoint weights.ckpt
+    python examples/run_model.py scene.tif --model esasrgan --device cuda --batch-size 8
 
 ``--help`` does not import torch, rasterio, or optional model packages.
-Model-specific dependencies and weights are described in ``examples/README.md``.
+Model-specific dependencies and weights are described in ``README.md`` in this directory.
 """
 
 from __future__ import annotations

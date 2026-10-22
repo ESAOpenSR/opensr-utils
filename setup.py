@@ -50,6 +50,7 @@ setup(
         # SEN2SR and MLSTAC currently require Python >=3.10. Keeping these
         # integrations optional preserves the core package's Python 3.9 floor.
         "sen2sr": ["sen2sr>=0.8.5", "mlstac>=0.4.9"],
+        "sen2sr-ldsr": ["sen2sr>=0.8.5", "mlstac>=0.4.9", "opensr-model>=1.0.0"],
         # opensr-srgan supports Python >=3.12,<3.15 upstream.
         "srgan": ["opensr-srgan>=0.5.1"],
         "all-models": [

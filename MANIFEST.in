@@ -1,5 +1,5 @@
-include demo.py
 include run_batch.sh
 recursive-include examples *.py *.md
 recursive-include tests *.py *.md
 include .github/constraints-oldest.txt
+exclude demo.py

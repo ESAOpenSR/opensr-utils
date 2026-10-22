@@ -64,56 +64,78 @@ with large_file_processing(
 The one-call API always executes once and closes raster handles. The class also
 has `close()` for callers who do not use a context manager.
 
-## SEN2SR and ESA SRGAN
+## Model examples
 
-The named loaders return adapters for the models' actual inference contracts:
-
-| Name | Supported pretrained model | Python | Input/output |
-| --- | --- | --- | --- |
-| `SEN2SR` | SEN2SRLite `NonReference_RGBN_x4` | 3.10–3.14 | Four RGB/NIR bands, 4× scale. |
-| `ESASRGAN` or `SRGAN` | ESA OpenSR SRGAN `RGB-NIR` preset | 3.12–3.14 | Four RGB/NIR bands, 4× scale. |
-| `LDSRS2` | ESA LDSR-S2 | Upstream package compatibility | Four RGB/NIR bands, 4× scale. |
+Runnable examples live in **[examples/](examples/README.md)**. Each script has
+`--help`, device selection, batching, tiling and output options. Start with
+Python 3.12–3.14 and install the extra for your chosen model:
 
 ```bash
-python -m pip install 'opensr-utils[sen2sr]'
-python -m pip install 'opensr-utils[srgan]'
+python -m pip install 'opensr-utils[sen2sr-ldsr]'  # SEN2SR + LDSR-S2 backbone
+python -m pip install 'opensr-utils[model]'        # LDSR-S2 RGB-NIR alone
+python -m pip install 'opensr-utils[srgan]'        # ESA SRGAN RGB-NIR
+
+# All ten supported Sentinel-2 bands, with LDSR-S2 as the RGB-NIR backbone.
+python examples/run_sen2sr.py scene.SAFE.zip --device cuda --output results/all_bands.tif
+
+# Separate four-band RGB-NIR diffusion example.
+python examples/run_ldsrs2.py scene.SAFE.zip --device cuda --output results/rgbn.tif
+
+# Four-band ESA SRGAN example.
+python examples/run_esasrgan.py scene.tif --device cuda --output results/srgan.tif
+
+# Interpolation and advanced generic options.
+python examples/run_model.py --help
+python examples/run_model.py scene.tif --model none --factor 1 --output results/check.tif
 ```
+
+| Example | Model and bands | Scale |
+| --- | --- | --- |
+| `run_sen2sr.py` | SEN2SRLite all-band fusion with an **LDSR-S2 RGB-NIR backbone**. Input/output: **B02, B03, B04, B05, B06, B07, B08, B8A, B11, B12**. | 10 m reference grid → 2.5 m |
+| `run_ldsrs2.py` | LDSR-S2 alone. Input/output: **B04, B03, B02, B08** (RGB-NIR). | 4× |
+| `run_esasrgan.py` | ESA SRGAN `RGB-NIR` preset. Input/output: **B04, B03, B02, B08**. | 4× |
+
+“All bands” means the ten bands supported by SEN2SR; B01, B09 and B10 are not
+model inputs. The all-band example retains SEN2SR's learned red-edge/SWIR fusion
+stages and replaces its RGB-NIR generator with LDSR-S2. For SAFE/S2GM folders,
+it explicitly resamples native 20 m bands onto the RGB 10 m reference grid using
+windowed nearest-neighbor reads, then applies the learned model. It writes ten
+labeled bands at 2.5 m, preserving the georeferenced footprint and validity mask.
+No full intermediate stack is needed.
+
+The generic named `SEN2SR` loader still defaults to its four-band RGB-NIR
+variant for compatibility. The all-band example explicitly selects
+`variant="main", backbone="ldsrs2"`.
+
+The same composition is available in Python:
 
 ```python
 from opensr_utils import super_resolve
+from opensr_utils.model_utils import get_model
 
-super_resolve('scene.SAFE', 'SEN2SR', 'results/sen2sr.tif', batch_size=1)
-super_resolve('scene.SAFE', 'ESASRGAN', 'results/srgan.tif', batch_size=4)
+# Downloads SEN2SR fusion artifacts and the LDSR-S2 backbone on first use.
+model = get_model("SEN2SR", variant="main", backbone="ldsrs2", device="cpu")
+output = super_resolve(
+    "scene.SAFE.zip", model, "results/all_bands.tif",
+    device="auto", batch_size=1, resample_inputs=True,
+)
+
+# LDSR-S2 alone produces only R, G, B and NIR.
+from opensr_utils.model_utils.ldsrs2 import load_ldsrs2
+
+rgbn_model = load_ldsrs2()
+output_rgbn = super_resolve("scene.SAFE.zip", rgbn_model, "results/rgbn.tif")
 ```
 
-SEN2SRLite expects fixed 128×128 tiles. The adapter replicate-pads smaller edge
-windows and crops predictions back to their true footprint. Larger windows are
-rejected clearly. The four-band adapter does not load the ten-band/full Mamba
-variants. The ESA SRGAN adapter preserves the official `predict_step` path,
-including histogram matching and EMA behavior; pass the adapter rather than an
-unwrapped upstream Lightning module to retain those semantics. All adapters use
-normalized values, explicit scales and named output bands.
+Standalone GeoTIFFs must already share a grid. Band descriptions select and order
+model channels automatically; unlabeled inputs must use the order in the table,
+or supply `--bands` / `band_indexes` explicitly. Fixed 128×128 model tiles are
+replicate-padded and cropped for smaller edge windows. The SRGAN adapter retains
+the official histogram matching and EMA inference path.
 
-SAFE/S2GM model inputs select and order the required **B04, B03, B02, B08** bands,
-ignoring other spectral channels. GeoTIFF band descriptions can identify those
-bands automatically; otherwise provide four native RGB/NIR channels or explicit
-1-based indexes, for example `band_indexes=[4, 5, 2, 1]` (`--bands 4 5 2 1` on CLI).
-Output GeoTIFFs retain the adapter's spectral band names.
-
-See **[model demos and download instructions](examples/README.md)** for automatic
-and offline use of official weights. The instruction script has complete help:
-
-```bash
-python demo.py --help
-python demo.py scene.tif --model none --factor 1 --output results/check.tif
-python examples/run_sen2sr.py scene.SAFE.zip --batch-size 1 --output results/sen2sr.tif
-python examples/run_esasrgan.py scene.tif --batch-size 4 --output results/srgan.tif
-```
-
-`demo.py` performs no inference on import and accepts device/GPU selection,
-checkpoints, configs, download/cache controls, band indexes, tiling, batching,
-overwrite, retention and previews. `--device cuda:1` is a convenience for selecting
-a single GPU; `--device cuda --gpus 0 1` selects multiple GPUs.
+See [examples/README.md](examples/README.md) for local weights, offline inference
+and diffusion sampling options. The root `demo.py` is a local, ignored scratch
+script; published examples, tests and source distributions use `examples/`.
 
 ## Command line
 
@@ -151,6 +173,7 @@ processing failures report a diagnostic and return a nonzero exit status.
 | `num_workers` / `--num-workers` | `0` | Increase for parallel raster reads when I/O limits throughput. |
 | `prefetch_factor` / `--prefetch-factor` | `2` | Positive batches per worker; ignored with zero workers. |
 | `output_units` / `--output-units` | Model units, otherwise `normalized` | Explicit prediction units, described below. |
+| `resample_inputs` (Python) | `False` | Explicitly map folder bands to the selected reference grid; enabled by the all-band SEN2SR example. |
 | `band_indexes` / `--bands` | Model descriptions or native order | Select 1-based channels from a file in model input order. |
 | `checkpoint` / `--checkpoint` | Download official preset | Local SEN2SR MLSTAC directory/export or ESA SRGAN weights. |
 | `model_config` / `--config` | Preset config | ESA SRGAN YAML accompanying local weights. |
@@ -172,8 +195,9 @@ spectral channels on the selected grid. Auxiliary bands such as AOT, WVP and TCI
 are excluded. Generic PyTorch models retain native file band order and channel count; adapters
 with declared spectral inputs select named or explicitly indexed bands.
 SAFE discovery prefers 10 m common bands. Bands on other-sized grids are omitted;
-same-sized bands with different transforms or CRSs are rejected. No implicit
-reprojection occurs. Models must accept the discovered channels; model output
+same-sized bands with different transforms or CRSs are rejected. Set
+`resample_inputs=True` explicitly to read folder bands on the selected reference
+grid, as in the all-band example; default discovery performs no reprojection. Models must accept the discovered channels; model output
 channel counts may differ from input counts. LDSR-S2 expects Sentinel-2 RGB/NIR
 inputs; use a model suited to mosaics for S2GM data.
 

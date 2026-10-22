@@ -12,8 +12,8 @@ run as normal tests, with no expected-failure markers.
 python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 python -m pip install -e '.[dev,cog]'
 python -m pytest -q
-python -m ruff check opensr_utils tests examples setup.py demo.py
-python -m ruff format --check opensr_utils tests examples setup.py demo.py
+python -m ruff check opensr_utils tests examples setup.py
+python -m ruff format --check opensr_utils tests examples setup.py
 ```
 
 The prepared workspace environment is `/work/envs/opensr/bin/python`. The real
@@ -40,9 +40,13 @@ coverage report.
 The model tests keep official downloads outside the normal test suite. Adapter
 tests exercise tensor values, batch shapes, tile padding/cropping, normalization,
 ESA histogram-inference delegation, band selection and labeled GeoTIFF output.
-Pretrained smoke runs use the published SEN2SRLite RGBN and ESA RGB-NIR artifacts
+Pretrained smoke runs use SEN2SRLite RGBN, its ten-band fusion with an LDSR-S2
+backbone, standalone LDSR-S2 RGB-NIR, and ESA SRGAN RGB-NIR artifacts
 following [the model examples](../examples/README.md). Optional model dependencies
 can be installed with `.[sen2sr]` (Python 3.10+) and `.[srgan]` (Python 3.12–3.14).
+Use `.[sen2sr-ldsr]` for the all-band diffusion example. Native-resolution
+SAFE/S2GM tests check resampled values, band order and independent validity;
+spawn-style dataset serialization reopens virtual grids instead of GDAL handles.
 
 ## Contracts and scope
 

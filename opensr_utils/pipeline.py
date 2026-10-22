@@ -40,6 +40,11 @@ class large_file_processing:
     ``compressed_patches`` allow throughput/storage tuning. Models load on CPU
     before Lightning places them on their execution devices.
 
+    ``resample_inputs=True`` explicitly maps folder bands onto the selected
+    reference grid with nearest-neighbor WarpedVRT reads. This retains native
+    20 m inputs for SEN2SR's all-band fusion without a full intermediate stack.
+    Default discovery keeps its strict grid validation and excludes other sizes.
+
     Model inputs are normalized to [0,1]. ``output_units="normalized"`` scales
     predictions by 10000; ``"reflectance"`` accepts existing [0,10000] values.
     Nonfinite outputs are errors; finite outputs are clipped, rounded and saved
@@ -88,6 +93,7 @@ class large_file_processing:
         model_variant=None,
         download: bool = True,
         band_indexes=None,
+        resample_inputs: bool = False,
     ):
         # 1) Validate public inputs. Do not use assert: optimized Python removes it.
         if isinstance(model, str):
@@ -181,6 +187,7 @@ class large_file_processing:
                 )
             band_indexes = list(band_indexes)
         self._requested_band_indexes = band_indexes
+        self.resample_inputs = bool(resample_inputs)
         if not isinstance(model, str) and any(
             value is not None
             for value in (checkpoint, model_config, cache_dir, model_variant)
@@ -310,6 +317,14 @@ class large_file_processing:
             )
         self.output_units = output_units or model_units or "normalized"
         self._configure_model_input(model)
+        if self.image_meta.get("resample_grid"):
+            from opensr_utils.data_utils.grids import open_input_raster
+
+            # Fail before optional ZIP deletion if any selected view cannot
+            # be georeferenced on the target grid.
+            for path in self.image_meta["lr_file_dict"].values():
+                with open_input_raster(path, self.image_meta["resample_grid"]):
+                    pass
         self.create_datamodule()
 
         # Make sure model is useable and in eval mode
@@ -427,7 +442,11 @@ class large_file_processing:
                 raise FileNotFoundError(
                     f"Model requires missing spectral bands {missing}; available bands: {sorted(by_band)}."
                 )
-            self.image_meta["lr_file_dict"] = dict(by_band[band] for band in required)
+            # Canonical keys preserve the model's requested order, including
+            # all-band wavelength order instead of the generic RGB-NIR prefix.
+            self.image_meta["lr_file_dict"] = {
+                band: by_band[band][1] for band in required
+            }
             self.image_meta["bands"] = len(required)
 
     def create_datamodule(self, windows=None):
@@ -446,6 +465,7 @@ class large_file_processing:
             windows=self.image_meta["image_windows"] if windows is None else windows,
             lr_file_dict=self.image_meta["lr_file_dict"],
             band_indexes=self.image_meta.get("band_indexes"),
+            resample_grid=self.image_meta.get("resample_grid"),
             prefetch_factor=self.prefetch_factor,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
@@ -521,11 +541,18 @@ class large_file_processing:
                 except FileNotFoundError:
                     pass
             used = set(lr_file_dict.values())
+            seen_bands = {safe_band_name(path) for path in used}
             for path in jp2s:
                 if path not in used:
                     name = safe_band_name(path)
-                    if name.startswith("B") and name[1:].isalnum():
-                        lr_file_dict[name] = path
+                    if (
+                        name.startswith("B")
+                        and name[1:].isalnum()
+                        and name not in seen_bands
+                    ):
+                        # Prefer the native 20 m copy to a duplicate 60 m copy.
+                        lr_file_dict[name] = pick_safe_band(name)
+                        seen_bands.add(name)
             if not lr_file_dict:
                 raise FileNotFoundError(f"No usable SAFE bands found in {self.root}.")
 
@@ -542,6 +569,9 @@ class large_file_processing:
             same_grid = {}
             for label, path in lr_file_dict.items():
                 with rasterio.open(path) as src:
+                    if self.resample_inputs:
+                        same_grid[label] = path
+                        continue
                     if (
                         src.width == self.image_meta["width"]
                         and src.height == self.image_meta["height"]
@@ -614,6 +644,9 @@ class large_file_processing:
             same_grid = {}
             for label, path in self.image_meta["lr_file_dict"].items():
                 with rasterio.open(path) as src:
+                    if self.resample_inputs:
+                        same_grid[label] = path
+                        continue
                     if (
                         src.width == self.image_meta["width"]
                         and src.height == self.image_meta["height"]
@@ -631,6 +664,16 @@ class large_file_processing:
             self.image_meta["bands"] = len(self.image_meta["lr_file_dict"])
             if self.image_meta["bands"] <= 0:
                 raise FileNotFoundError("No S2GM bands matched the selected grid size.")
+
+        if self.resample_inputs and self.input_type != "file":
+            if self.image_meta["crs"] is None:
+                raise ValueError(
+                    "Input resampling requires georeferenced rasters with a CRS."
+                )
+            self.image_meta["resample_grid"] = {
+                name: self.image_meta[name]
+                for name in ("width", "height", "transform", "crs")
+            }
 
         # Protect every selected source band, including directory inputs.  The
         # samefile check catches an existing hardlink even when its pathname is

@@ -65,7 +65,7 @@ def get_ldsrs2(device: str = "cpu"):
 
 
 def get_sen2sr(*args, **kwargs):
-    """Load the supported SEN2SRLite RGBN adapter; see ``sen2sr.load_sen2sr``."""
+    """Load a four- or ten-band SEN2SR adapter; see ``sen2sr.load_sen2sr``."""
     from .sen2sr import load_sen2sr
 
     return load_sen2sr(*args, **kwargs)
@@ -91,7 +91,9 @@ def get_model(
 ):
     """Load a named model, with downloads and local artifacts kept explicit.
 
-    ``SEN2SR`` uses the four-band SEN2SRLite RGBN model. A local ``checkpoint``
+    ``SEN2SR`` defaults to four-band SEN2SRLite RGBN. ``variant='main'`` selects
+    all ten bands; ``backbone='ldsrs2'`` replaces its RGB-NIR generator with
+    LDSR-S2, keeping SEN2SR's learned fusion stages. A local ``checkpoint``
     can name its MLSTAC directory/manifest, or a supported exported model file.
     ``ESASRGAN`` and ``SRGAN`` are aliases for ESA's RGB-NIR preset; official
     local state dictionaries require both ``config`` and ``checkpoint``.
@@ -113,6 +115,23 @@ def get_model(
             )
         return None
     if name == "LDSRS2":
+        if (
+            checkpoint is not None
+            or config is not None
+            or not download
+            or model_options
+        ):
+            from .ldsrs2 import load_ldsrs2
+
+            if cache_dir is not None or variant is not None:
+                raise ValueError("LDSR-S2 does not use cache_dir or variant overrides.")
+            return load_ldsrs2(
+                device=device,
+                checkpoint=checkpoint,
+                config_path=config,
+                download=download,
+                **model_options,
+            )
         if (
             checkpoint is not None
             or config is not None

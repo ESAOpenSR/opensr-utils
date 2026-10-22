@@ -4,9 +4,10 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from pytorch_lightning import LightningDataModule
 import os
-import rasterio
 import numpy as np
+from contextlib import ExitStack
 from torch.utils.data import Sampler
+from .grids import open_input_raster
 
 
 class ShardedInferenceSampler(Sampler[int]):
@@ -92,12 +93,22 @@ class PredictionDataset(Dataset):
     - Dictionary inputs can contain any number of bands.
     """
 
-    def __init__(self, input_type, root, windows, lr_file_dict, band_indexes=None):
+    def __init__(
+        self,
+        input_type,
+        root,
+        windows,
+        lr_file_dict,
+        band_indexes=None,
+        resample_grid=None,
+    ):
         # Set properties
         self.input_type = input_type
         self.root = root
         self.windows = windows
         self.lr_file_dict = lr_file_dict
+        self.resample_grid = resample_grid
+        self._source_stack = ExitStack()
         if band_indexes is None:
             self.band_indexes = None
         else:
@@ -135,16 +146,21 @@ class PredictionDataset(Dataset):
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_src_cache"] = {}
+        state["_source_stack"] = None
         return state
 
     def _open_cached(self, path):
         if path not in self._src_cache:
-            self._src_cache[path] = rasterio.open(path)
+            if self._source_stack is None:
+                self._source_stack = ExitStack()
+            self._src_cache[path] = self._source_stack.enter_context(
+                open_input_raster(path, self.resample_grid)
+            )
         return self._src_cache[path]
 
     def close(self):
-        for src in self._src_cache.values():
-            src.close()
+        if self._source_stack is not None:
+            self._source_stack.close()
         self._src_cache.clear()
 
     def __del__(self):
@@ -283,6 +299,7 @@ class PredictionDataModule(LightningDataModule):
         batch_size=16,
         num_workers=4,
         band_indexes=None,
+        resample_grid=None,
     ):
         super().__init__()
         self.input_type = input_type
@@ -293,6 +310,7 @@ class PredictionDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.prefetch_factor = prefetch_factor
         self.band_indexes = band_indexes
+        self.resample_grid = resample_grid
 
     def setup(self, stage=None):
         """
@@ -309,6 +327,7 @@ class PredictionDataModule(LightningDataModule):
             windows=self.windows,
             lr_file_dict=self.lr_file_dict,
             band_indexes=self.band_indexes,
+            resample_grid=self.resample_grid,
         )
 
     def predict_dataloader(self):
