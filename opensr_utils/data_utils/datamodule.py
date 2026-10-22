@@ -4,10 +4,10 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from pytorch_lightning import LightningDataModule
 import os
-import rasterio
 import numpy as np
-from rasterio.windows import Window
+from contextlib import ExitStack
 from torch.utils.data import Sampler
+from .grids import open_input_raster
 
 
 class ShardedInferenceSampler(Sampler[int]):
@@ -43,7 +43,9 @@ def _infer_rank_world():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         return torch.distributed.get_rank(), torch.distributed.get_world_size()
     # Fallback to env if called a bit early; OK because we only use it in predict_dataloader
-    rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
+    # RANK is the global process id.  LOCAL_RANK is only a device index and
+    # must not be used for sharding when a launcher has supplied both.
+    rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
     world = int(os.environ.get("WORLD_SIZE", "1"))
     return rank, world
 
@@ -71,6 +73,9 @@ class PredictionDataset(Dataset):
         Path to the raster file or folder.
     windows : list of rasterio.windows.Window
         Sliding windows defining LR patches to read.
+    band_indexes : sequence of int, optional
+        For file inputs, the 1-based Rasterio channel indexes to read, in model
+        order. ``None`` preserves the native all-channel behavior.
 
     Returns
     -------
@@ -84,15 +89,38 @@ class PredictionDataset(Dataset):
     -----
     - Input values are divided by 10000.0 and clamped to [0,1].
     - File inputs preserve the raster's native band order and band count.
+    - Selected file channels preserve the order supplied in ``band_indexes``.
     - Dictionary inputs can contain any number of bands.
     """
 
-    def __init__(self, input_type, root, windows, lr_file_dict):
+    def __init__(
+        self,
+        input_type,
+        root,
+        windows,
+        lr_file_dict,
+        band_indexes=None,
+        resample_grid=None,
+    ):
         # Set properties
         self.input_type = input_type
         self.root = root
         self.windows = windows
         self.lr_file_dict = lr_file_dict
+        self.resample_grid = resample_grid
+        self._source_stack = ExitStack()
+        if band_indexes is None:
+            self.band_indexes = None
+        else:
+            self.band_indexes = tuple(int(index) for index in band_indexes)
+            if (
+                not self.band_indexes
+                or any(index < 1 for index in self.band_indexes)
+                or len(set(self.band_indexes)) != len(self.band_indexes)
+            ):
+                raise ValueError(
+                    "band_indexes must contain unique positive Rasterio band indexes."
+                )
         self._src_cache = {}
 
         # 1. If file
@@ -118,16 +146,21 @@ class PredictionDataset(Dataset):
     def __getstate__(self):
         state = self.__dict__.copy()
         state["_src_cache"] = {}
+        state["_source_stack"] = None
         return state
 
     def _open_cached(self, path):
         if path not in self._src_cache:
-            self._src_cache[path] = rasterio.open(path)
+            if self._source_stack is None:
+                self._source_stack = ExitStack()
+            self._src_cache[path] = self._source_stack.enter_context(
+                open_input_raster(path, self.resample_grid)
+            )
         return self._src_cache[path]
 
     def close(self):
-        for src in self._src_cache.values():
-            src.close()
+        if self._source_stack is not None:
+            self._source_stack.close()
         self._src_cache.clear()
 
     def __del__(self):
@@ -183,8 +216,15 @@ class PredictionDataset(Dataset):
         """
         window = self.windows[idx]
         src = self._open_cached(self.root)
-        data = src.read(window=window)  # np.ndarray
+        indexes = self.band_indexes
+        data = src.read(indexes=indexes, window=window)  # np.ndarray
         data = data.astype(np.float32)
+        # Masking is deliberately separate from clipping: a real zero is a
+        # valid observation and must remain distinguishable from nodata.
+        valid = (src.read_masks(indexes=indexes, window=window) != 0) & np.isfinite(
+            data
+        )
+        data[~valid] = 0.0
         return torch.from_numpy(data)
 
     def get_from_dict(self, idx):
@@ -203,13 +243,18 @@ class PredictionDataset(Dataset):
         """
         window = self.windows[idx]
         tiles = []
+        valid = None
         for b in self.band_order:
             src = self._open_cached(self.lr_file_dict[b])
             tile = src.read(1, window=window)
             tiles.append(tile)
+            band_valid = src.read_masks(1, window=window) != 0
+            band_valid &= np.isfinite(tile)
+            valid = band_valid if valid is None else (valid & band_valid)
         if not tiles:
             raise ValueError("No input bands were configured for dictionary input.")
         arr = np.stack(tiles, axis=0).astype(np.float32)
+        arr[:, ~valid] = 0.0
         return torch.from_numpy(arr)
 
 
@@ -232,6 +277,9 @@ class PredictionDataModule(LightningDataModule):
         Number of batches to prefetch per worker.
     batch_size : int, default=16
         Number of patches per batch.
+    band_indexes : sequence of int, optional
+        1-based Rasterio channel indexes forwarded to ``PredictionDataset`` for
+        file inputs.
     num_workers : int, default=4
         Number of worker processes for data loading.
 
@@ -250,6 +298,8 @@ class PredictionDataModule(LightningDataModule):
         prefetch_factor=2,
         batch_size=16,
         num_workers=4,
+        band_indexes=None,
+        resample_grid=None,
     ):
         super().__init__()
         self.input_type = input_type
@@ -259,6 +309,8 @@ class PredictionDataModule(LightningDataModule):
         self.num_workers = num_workers
         self.batch_size = batch_size
         self.prefetch_factor = prefetch_factor
+        self.band_indexes = band_indexes
+        self.resample_grid = resample_grid
 
     def setup(self, stage=None):
         """
@@ -274,6 +326,8 @@ class PredictionDataModule(LightningDataModule):
             root=self.root,
             windows=self.windows,
             lr_file_dict=self.lr_file_dict,
+            band_indexes=self.band_indexes,
+            resample_grid=self.resample_grid,
         )
 
     def predict_dataloader(self):
@@ -289,6 +343,18 @@ class PredictionDataModule(LightningDataModule):
                 rank=rank,
                 world_size=world,
             )
+
+            if len(sampler) == 0:
+                # Lightning skips prediction hooks entirely for a zero-length
+                # local loader.  A control-only batch keeps on_predict_start
+                # and on_predict_end symmetric across ranks while carrying no
+                # image, metadata, or fabricated inference window.
+                return DataLoader(
+                    [{"_opensr_empty_rank": True}],
+                    batch_size=1,
+                    shuffle=False,
+                    num_workers=0,
+                )
 
         # Pin memory only if running on CUDA
         pin_memory = torch.cuda.is_available()

@@ -4,8 +4,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import rasterio
 
-pytest.importorskip("rasterio")
 
 from opensr_utils.data_utils import reading_utils
 
@@ -78,10 +78,14 @@ def test_verify_input_file_type_extracts_safe_zip(dummy_runner, tmp_path):
     assert archive.exists()
 
 
-def test_verify_input_file_type_can_delete_zip_after_extract(dummy_runner, tmp_path):
+def test_verify_input_file_type_can_delete_zip_after_extract(
+    dummy_runner, write_raster, tmp_path
+):
+    band = write_raster(tmp_path / "B04.tif")
     archive = tmp_path / "download.zip"
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr("S2A_TEST.SAFE/manifest.safe", "")
+        zf.write(band, "S2A_TEST.SAFE/GRANULE/L2A/IMG_DATA/T_TEST_B04_10m.jp2")
     dummy_runner.delete_input_zip = True
 
     reading_utils.verify_input_file_type(dummy_runner, str(archive))
@@ -134,3 +138,132 @@ def test_create_dirs_uses_s2gm_folder_as_base(dummy_runner, s2gm_folder):
 
     assert dummy_runner.placeholder_path == str(s2gm_folder)
     assert Path(dummy_runner.log_dir).parent == s2gm_folder
+
+
+@pytest.mark.parametrize(
+    "filename", ["scene.tif", "scene.TIF", "scene.tiff", "scene.TIFF"]
+)
+def test_input_detection_accepts_readable_rasters_regardless_of_extension_case(
+    write_raster, dummy_runner, tmp_path, filename
+):
+    path = write_raster(tmp_path / filename)
+    reading_utils.verify_input_file_type(dummy_runner, path)
+    assert dummy_runner.input_type == "file"
+    assert dummy_runner.root == str(path)
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_corrupt_zip_is_preserved_on_extraction_failure(dummy_runner, tmp_path, delete):
+    archive = tmp_path / "broken.zip"
+    archive.write_bytes(b"not a zip")
+    dummy_runner.delete_input_zip = delete
+    with pytest.raises(zipfile.BadZipFile):
+        reading_utils.verify_input_file_type(dummy_runner, archive)
+    assert archive.read_bytes() == b"not a zip"
+
+
+@pytest.mark.parametrize(
+    "member",
+    ["../escaped.SAFE/manifest.safe", "nested/../../escaped.SAFE/manifest.safe"],
+)
+def test_all_zip_members_are_validated_before_any_extraction(
+    dummy_runner, tmp_path, member
+):
+    archive = tmp_path / "download.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("scene.SAFE/manifest.safe", "valid member comes first")
+        zf.writestr(member, "unsafe member")
+    with pytest.raises(RuntimeError, match="Unsafe path"):
+        reading_utils.verify_input_file_type(dummy_runner, archive)
+    assert not (tmp_path / "download" / "scene.SAFE").exists()
+    assert not (tmp_path / "escaped.SAFE").exists()
+    assert archive.exists()
+
+
+def test_zip_can_be_reused_after_opt_in_source_deletion(
+    dummy_runner, write_raster, tmp_path
+):
+    band = write_raster(tmp_path / "B04.tif")
+    archive = tmp_path / "scene.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("scene.SAFE/manifest.safe", "preserve extracted content")
+        zf.write(band, "scene.SAFE/GRANULE/L2A/IMG_DATA/T_TEST_B04_10m.jp2")
+    dummy_runner.delete_input_zip = True
+    reading_utils.verify_input_file_type(dummy_runner, archive)
+    first_root = dummy_runner.root
+    assert not archive.exists()
+    reading_utils.verify_input_file_type(dummy_runner, archive)
+    assert dummy_runner.root == first_root
+    assert (
+        Path(first_root) / "manifest.safe"
+    ).read_text() == "preserve extracted content"
+
+
+def test_worker_uses_preextracted_safe_without_deleting_source(
+    monkeypatch, dummy_runner, tmp_path
+):
+    archive = tmp_path / "scene.zip"
+    archive.write_bytes(b"worker must not open this archive")
+    extracted = tmp_path / "scene" / "scene.SAFE"
+    extracted.mkdir(parents=True)
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setenv("RANK", "1")
+    monkeypatch.setenv("LOCAL_RANK", "1")
+    dummy_runner.delete_input_zip = True
+    reading_utils.verify_input_file_type(dummy_runner, archive)
+    assert dummy_runner.input_type == "SAFE"
+    assert dummy_runner.root == str(extracted)
+    assert archive.exists()
+
+
+def test_zip_without_safe_is_retained_even_when_deletion_was_requested(
+    dummy_runner, tmp_path
+):
+    archive = tmp_path / "wrong_download.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("readme.txt", "not a satellite product")
+    dummy_runner.delete_input_zip = True
+    with pytest.raises(NotImplementedError, match="does not contain"):
+        reading_utils.verify_input_file_type(dummy_runner, archive)
+    assert archive.exists()
+
+
+def test_zip_with_empty_safe_is_retained_after_pipeline_validation(
+    tmp_path, pipeline_factory
+):
+    archive = tmp_path / "empty_product.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("empty.SAFE/manifest.safe", "metadata only")
+
+    with pytest.raises(FileNotFoundError, match="No JP2 bands|usable SAFE bands"):
+        pipeline_factory(archive, delete_input_zip=True)
+    assert archive.exists()
+
+
+def test_zip_with_corrupt_safe_band_is_retained_after_pipeline_validation(
+    tmp_path, pipeline_factory
+):
+    archive = tmp_path / "corrupt_product.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(
+            "corrupt.SAFE/GRANULE/L2A/IMG_DATA/T_TEST_B04_10m.jp2",
+            "not a JPEG2000 raster",
+        )
+
+    with pytest.raises(rasterio.errors.RasterioIOError):
+        pipeline_factory(archive, delete_input_zip=True)
+    assert archive.exists()
+
+
+def test_create_dirs_is_idempotent_and_keeps_existing_logs(dummy_runner, tmp_path):
+    dummy_runner.root = str(tmp_path / "scene.tif")
+    dummy_runner.input_type = "file"
+    dummy_runner.run_id = "test"
+    dummy_runner.image_meta = {}
+    reading_utils.create_dirs(dummy_runner)
+    log = Path(dummy_runner.log_file)
+    log.write_text("previous diagnostics\n")
+    reading_utils.create_dirs(dummy_runner)
+    assert log.read_text() == "previous diagnostics\n"
+    assert Path(dummy_runner.temp_folder).is_dir()
+    assert Path(dummy_runner.output_dir) == tmp_path

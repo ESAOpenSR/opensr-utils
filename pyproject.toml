@@ -2,3 +2,24 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+xfail_strict = true
+markers = [
+    "integration: exercises the real CPU inference or COG pipeline on local rasters",
+    "known_bug: desired behavior blocked by a documented defect (strict xfail)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["opensr_utils"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

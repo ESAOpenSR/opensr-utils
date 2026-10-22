@@ -1,7 +1,7 @@
 import rasterio
-import os, shutil, zipfile
+import os
+import zipfile
 from pathlib import Path
-from datetime import datetime
 import time
 
 
@@ -71,7 +71,7 @@ def can_read_directly_with_rasterio(self, filename):
     if ext.lower() in supported_extensions:
         try:
             # Attempt to open the file with Rasterio to ensure it's not just a matching extension
-            with rasterio.open(filename) as src:
+            with rasterio.open(filename):
                 return True
         except rasterio.errors.RasterioIOError:
             self._log(f"Rasterio can't open {filename}.")
@@ -124,14 +124,14 @@ def create_dirs(self):
     """
 
     def _is_rank0_env() -> bool:
-        # Works before torch.distributed init: rely on launcher env vars if present
+        # Global rank is authoritative when both launcher variables are present.
         lr = os.environ.get("LOCAL_RANK", "")
         r = os.environ.get("RANK", "")
-        ws = os.environ.get("WORLD_SIZE", "1")
-        if ws not in ("", "1"):  # multi-process likely
-            # treat rank0 when both LOCAL_RANK and RANK are 0 or empty
-            return (lr in ("", "0")) and (r in ("", "0"))
-        return True  # single process → rank0
+        if r != "":
+            return r == "0"
+        if lr != "":
+            return lr == "0"
+        return True
 
     def _wait_until(predicate, timeout_s=600.0, sleep_s=0.1, what="dirs"):
         t0 = time.time()
@@ -145,7 +145,27 @@ def create_dirs(self):
         raise TimeoutError(f"Timed out waiting for {what} prepared by rank0.")
 
     p = Path(self.root)
-    if self.input_type == "SAFE":
+    requested_output = getattr(self, "output_path", None)
+    output_path = (
+        Path(requested_output).expanduser()
+        if requested_output
+        else (p.parent / "sr.tif" if self.input_type == "file" else None)
+    )
+    if output_path and self.input_type == "file":
+        # Resolve the default and explicit destinations before creating any dirs.
+        # samefile additionally catches an existing hardlink to the source.
+        try:
+            same_file = os.path.samefile(output_path, p)
+        except (FileNotFoundError, OSError):
+            same_file = False
+        if output_path.resolve() == p.resolve() or same_file:
+            raise ValueError(
+                "Output path must differ from the input raster; "
+                "writing in place is not supported."
+            )
+    if requested_output:
+        base = output_path.parent
+    elif self.input_type == "SAFE":
         base = p.parent
     elif self.input_type == "file":
         base = p.parent
@@ -239,9 +259,14 @@ def create_dirs(self):
     # Common paths for all ranks
     self.placeholder_path = str(base)
     self.output_dir = str(base)
-    self.placeholder_filepath = str(base / f"sr_placeholder_{run_id}.tif")
+    placeholder_name = (
+        f".sr_placeholder_{run_id}.tif"
+        if requested_output
+        else f"sr_placeholder_{run_id}.tif"
+    )
+    self.placeholder_filepath = str(base / placeholder_name)
     self.output_file_path = self.placeholder_filepath
-    self.final_sr_path = str(base / "sr.tif")
+    self.final_sr_path = str(output_path if requested_output else base / "sr.tif")
 
     # Metadata
     self.image_meta["placeholder_dir"] = self.placeholder_path
@@ -261,16 +286,18 @@ def verify_input_file_type(self, root):
         self.root        → final usable path (file or folder)
         self.input_type  → "file" | "SAFE" | "S2GM"
     """
-    import os, time, zipfile
+    import os
+    import time
     from pathlib import Path
 
     def _is_rank0_env() -> bool:
         lr = os.environ.get("LOCAL_RANK", "")
         r = os.environ.get("RANK", "")
-        ws = os.environ.get("WORLD_SIZE", "1")
-        if ws not in ("", "1"):
-            return (lr in ("", "0")) and (r in ("", "0"))
-        return True  # CPU/1-GPU → rank0 behavior
+        if r != "":
+            return r == "0"
+        if lr != "":
+            return lr == "0"
+        return True
 
     def _can_read_with_rasterio(self, path: str) -> bool:
         try:
@@ -316,16 +343,52 @@ def verify_input_file_type(self, root):
                 with zipfile.ZipFile(p, "r") as zf:
                     _safe_extract(zf, extract_dir)
 
-            # Mark ready for other ranks
+            # Validate the extracted result before publishing readiness or deleting
+            # the source.  In particular, a valid zip containing no SAFE product
+            # must remain available for inspection/retry.
+            safe_candidates = _find_safe()
+            if not safe_candidates:
+                raise NotImplementedError("🚫 Archive does not contain a .SAFE folder.")
+
+            # Mark ready for other ranks only after extraction and validation.
             try:
                 sentinel.write_text("ok")
             except Exception:
                 pass
 
-            # Optionally delete zip (rank0 only). Keep the source archive by default.
+            # A real pipeline validates the product in get_image_meta. Defer
+            # deletion until that method has opened usable spectral rasters;
+            # Standalone callers validate readable spectral data here instead.
             if getattr(self, "delete_input_zip", False) and p.exists():
-                p.unlink()
-                self._log(f"🗑️ Deleted archive: {p.name}")
+                if callable(getattr(self, "get_image_meta", None)):
+                    self._pending_input_zip_delete = str(p)
+                else:
+                    # Standalone callers do not run get_image_meta, so perform
+                    # the same minimal validation here before deleting the
+                    # source archive.
+                    spectral_files = [
+                        path
+                        for safe in safe_candidates
+                        for path in safe.rglob("*.jp2")
+                        if any(
+                            token.startswith("B") and token[1:].isalnum()
+                            for token in path.stem.split("_")
+                        )
+                    ]
+                    usable = False
+                    for spectral_path in spectral_files:
+                        try:
+                            with rasterio.open(spectral_path):
+                                usable = True
+                                break
+                        except Exception:
+                            continue
+                    if not usable:
+                        raise FileNotFoundError(
+                            f"No readable spectral bands found in {safe_candidates[0]}"
+                        )
+                    p.unlink()
+                    self._log(f"🗑️ Deleted archive: {p.name}")
         else:
             # Non-rank0: wait until .SAFE appears (or sentinel says ok)
             timeout_s = 600.0
@@ -364,7 +427,14 @@ def verify_input_file_type(self, root):
         return
 
     # ---------------- S2GM folder ----------------
-    if p.is_dir() and "S2GM" in str(p):
+    if p.is_dir() and (
+        "S2GM" in str(p)
+        or any(
+            band.stem.upper().startswith("B") and band.stem[1:].isdigit()
+            for band in p.rglob("*")
+            if band.suffix.lower() in (".tif", ".tiff")
+        )
+    ):
         self.input_type = "S2GM"
         self._log("📁 Input is Sentinel-2 S2GM folder — processing possible! 🚀")
         return

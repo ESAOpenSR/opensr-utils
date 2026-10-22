@@ -138,9 +138,10 @@ def _create_accumulator_files(
             profile.pop("blockxsize", None)
             profile.pop("blockysize", None)
 
-    with rasterio.open(sum_path, "w", **sum_profile) as sum_dst, rasterio.open(
-        weight_path, "w", **weight_profile
-    ) as weight_dst:
+    with (
+        rasterio.open(sum_path, "w", **sum_profile) as sum_dst,
+        rasterio.open(weight_path, "w", **weight_profile) as weight_dst,
+    ):
         if not initialize_from_dst:
             return
         nodata = dst.nodata
@@ -368,6 +369,8 @@ def write_to_placeholder(
         C, H, W = sr.shape
         if C != expected_C:
             raise ValueError(f"Band mismatch: dst has {expected_C} bands, SR has {C}")
+        if not np.isfinite(sr).all():
+            raise ValueError("SR patch contains NaN or infinite values")
 
         hr_win = Window(col_off=col_off, row_off=row_off, width=W, height=H)
         if (
@@ -458,24 +461,17 @@ def stitch_sr_patches(
     limit=None,
     *,
     cleanup_every=50,
+    cleanup=True,
     profile="linear",
     profile_alpha=6.0,
     gdal_cache_mb=256,
 ):
     """
-    Distributed-safe wrapper for stitching SR patches into a placeholder GeoTIFF.
+    Stitch staged SR patches into the placeholder GeoTIFF.
 
-    This function ensures that the expensive write phase is performed only once
-    (on global rank 0), while all other ranks in a distributed run return
-    immediately. A synchronization barrier is inserted to prevent race
-    conditions, using Lightning's strategy barrier when available.
-
-    Behavior by environment
-    -----------------------
-    - **CPU / single process**: Stitches normally.
-    - **Single GPU**: Stitches normally (rank 0 is the only rank).
-    - **Multi-GPU (DDP)**: Only rank 0 executes the stitch. Other ranks skip
-      and wait at a safe barrier to ensure consistent teardown.
+    This is the single-process write primitive. Distributed rank selection and
+    rank selection belongs to :func:`ddp_safe_stitch`. Publication respects
+    ``self.overwrite`` here as well, including concurrent destination creation.
 
     Parameters
     ----------
@@ -486,11 +482,16 @@ def stitch_sr_patches(
         Path to the ``index.json`` describing patches. Defaults to
         ``<temp_folder>/index.json``.
     limit : int, optional
-        If provided, only the first ``limit`` patches are stitched (useful
-        for debugging).
+        If provided, only the first ``limit`` patches are considered. The
+        selected patches must still cover the complete output before it can
+        be published; callers needing an incomplete preview should avoid the
+        stitching step entirely.
     cleanup_every : int, default=50
-        Frequency (in tiles) at which staged temporary files are deleted.
-        Set lower to reduce RAM usage.
+        Retained for API compatibility. Patch files are removed only after a
+        complete successful stitch, so failures leave inputs for diagnosis.
+    cleanup : bool, default=True
+        Remove consumed patch files after the output is validated and
+        published. Set to ``False`` to retain every patch and the manifest.
     profile : {"linear", "sigmoid", "cosine"}, default="linear"
         Feathering profile used when blending overlaps (see
         :func:`write_to_placeholder`).
@@ -501,16 +502,11 @@ def stitch_sr_patches(
 
     Returns
     -------
-    out : tuple or None
-        If run on rank 0, returns ``(sr_path, missing_count)`` from
-        :func:`stitch_sr_patches`. For other ranks, returns ``None``.
+    out : tuple
+        Returns ``(sr_path, missing_count)`` after successful publication.
 
     Notes
     -----
-    - This function should always be called instead of
-      :func:`stitch_sr_patches` directly in distributed runs.
-    - Uses Lightning's barrier if available; otherwise falls back to
-      ``torch.distributed.barrier()`` with proper safety checks.
     - Recommended environment settings for stability:
       ``GDAL_CACHEMAX=256`` and ``GDAL_NUM_THREADS=1``.
     """
@@ -521,6 +517,24 @@ def stitch_sr_patches(
         idx = json.load(f)
 
     entries = idx["entries"]
+    if not isinstance(entries, list):
+        raise ValueError("Patch manifest 'entries' must be a list")
+    required = ("row_off_lr", "col_off_lr", "width_lr", "height_lr", "path")
+    for entry in entries:
+        if any(key not in entry for key in required):
+            raise ValueError(f"Patch manifest entry is missing one of {required}")
+        try:
+            values = [float(entry[key]) for key in required[0:4]]
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Patch manifest window values must be numeric") from exc
+        if not np.isfinite(values).all() or any(v != int(v) for v in values):
+            raise ValueError("Patch manifest window values must be finite integers")
+        if values[0] < 0 or values[1] < 0 or values[2] <= 0 or values[3] <= 0:
+            raise ValueError(
+                "Patch manifest windows must have non-negative offsets and positive dimensions"
+            )
+        if not isinstance(entry["path"], str) or not entry["path"]:
+            raise ValueError("Patch manifest entry path must be a non-empty string")
     entries.sort(key=lambda e: (e["row_off_lr"], e["col_off_lr"]))
     if limit is not None:
         entries = entries[: int(limit)]
@@ -535,6 +549,8 @@ def stitch_sr_patches(
         ],
     }
     factor = int(idx.get("factor", self.factor))
+    if factor <= 0:
+        raise ValueError("Patch manifest factor must be a positive integer")
     # Public overlap/eliminate_border_px are specified in LR pixels. Blending
     # happens on SR patches, so convert both to HR pixels.
     overlap = int(self.overlap) * factor
@@ -552,7 +568,11 @@ def stitch_sr_patches(
     missing_count = 0
 
     # 3) GDAL environment + single open
-    with rasterio.Env(GDAL_CACHEMAX=gdal_cache_mb, NUM_THREADS="1"):
+    with rasterio.Env(
+        GDAL_CACHEMAX=gdal_cache_mb,
+        NUM_THREADS="1",
+        GDAL_TIFF_INTERNAL_MASK=True,
+    ):
         with rasterio.open(image_meta["placeholder_path"], "r+") as dst:
             if expected_bands and dst.count != int(expected_bands):
                 raise ValueError(
@@ -561,84 +581,111 @@ def stitch_sr_patches(
                 )
             sum_path = _accumulator_path(image_meta["placeholder_path"], "sum")
             weight_path = _accumulator_path(image_meta["placeholder_path"], "weights")
-            try:
-                _create_accumulator_files(
-                    dst,
-                    sum_path=sum_path,
-                    weight_path=weight_path,
-                    initialize_from_dst=False,
-                )
-                with rasterio.open(sum_path, "r+") as sum_dst, rasterio.open(
-                    weight_path, "r+"
-                ) as weight_dst:
-                    for i, e in enumerate(
-                        tqdm(entries, desc="Stitching → placeholder", unit="tile"),
-                        start=1,
-                    ):
-                        p = e["path"]
-                        try:
-                            if container == "npz" and p.endswith(".npz"):
-                                with np.load(p) as z:
-                                    sr = z[key]
-                            else:
-                                sr = np.load(p)
-
-                            write_to_placeholder(
-                                self,
-                                sr,
-                                i - 1,
-                                image_meta,
-                                factor=factor,
-                                overlap=overlap,
-                                eliminate_border_px=eliminate_border_px,
-                                profile=profile,
-                                profile_alpha=profile_alpha,
-                                dst=dst,
-                                sum_dst=sum_dst,
-                                weight_dst=weight_dst,
-                            )
-                            to_delete.append(p)
-                        except FileNotFoundError:
-                            missing_count += 1
-
-                        # periodic flush + cleanup
-                        if cleanup_every and (i % cleanup_every == 0):
-                            for fp in to_delete:
-                                try:
-                                    os.remove(fp)
-                                except FileNotFoundError:
-                                    pass
-                                for leftover in glob.glob(fp + ".*"):
-                                    try:
-                                        os.remove(leftover)
-                                    except FileNotFoundError:
-                                        pass
-                            to_delete.clear()
-
-                    if limit is None and missing_count == 0:
-                        uncovered = _count_uncovered_pixels(weight_dst)
-                        if uncovered:
-                            raise RuntimeError(
-                                f"{uncovered} output pixels were not covered by any tile."
-                            )
-            finally:
-                for aux_path in (sum_path, weight_path):
+            # Failed stitches keep their accumulators; cleanup follows publication.
+            _create_accumulator_files(
+                dst,
+                sum_path=sum_path,
+                weight_path=weight_path,
+                initialize_from_dst=False,
+            )
+            with (
+                rasterio.open(sum_path, "r+") as sum_dst,
+                rasterio.open(weight_path, "r+") as weight_dst,
+            ):
+                for i, e in enumerate(
+                    tqdm(entries, desc="Stitching → placeholder", unit="tile"),
+                    start=1,
+                ):
+                    p = e["path"]
                     try:
-                        os.remove(aux_path)
+                        if container == "npz" and p.endswith(".npz"):
+                            with np.load(p) as z:
+                                sr = z[key]
+                        else:
+                            sr = np.load(p)
+
+                        write_to_placeholder(
+                            self,
+                            sr,
+                            i - 1,
+                            image_meta,
+                            factor=factor,
+                            overlap=overlap,
+                            eliminate_border_px=eliminate_border_px,
+                            profile=profile,
+                            profile_alpha=profile_alpha,
+                            dst=dst,
+                            sum_dst=sum_dst,
+                            weight_dst=weight_dst,
+                        )
+                        to_delete.append(p)
                     except FileNotFoundError:
-                        pass
+                        missing_count += 1
+
+                if missing_count == 0:
+                    uncovered = _count_uncovered_pixels(weight_dst)
+                    if uncovered:
+                        raise RuntimeError(
+                            f"{uncovered} output pixels were not covered by any tile."
+                        )
+                # Apply source validity masks while the staging dataset is
+                # still open for discovered raster input.
+                if getattr(self, "input_type", None) and getattr(
+                    self, "image_meta", {}
+                ).get("lr_file_dict"):
+                    from .masking import apply_input_mask
+
+                    apply_input_mask(self, dst)
 
     if missing_count:
         raise RuntimeError(
             f"{missing_count} patch files were missing and could not be stitched."
         )
 
-    # 4) rename placeholder -> final
+    # 4) Publish the staging raster atomically. An existing final remains
+    # untouched until every patch and the coverage check have succeeded.
     sr_path = getattr(self, "final_sr_path", None) or image_meta[
         "placeholder_path"
     ].replace("sr_placeholder.tif", "sr.tif")
-    os.replace(image_meta["placeholder_path"], sr_path)
+    if getattr(self, "overwrite", False):
+        os.replace(image_meta["placeholder_path"], sr_path)
+        # These describe the previous raster and must not shadow the new
+        # product's internal mask, pixels or metadata. Leave them untouched
+        # until the replacement has been successfully published.
+        for suffix in (".msk", ".ovr", ".aux.xml"):
+            try:
+                os.remove(sr_path + suffix)
+            except FileNotFoundError:
+                pass
+    else:
+        # An existence check alone races with other jobs. Linking within the
+        # destination filesystem atomically creates the name only if absent.
+        try:
+            os.link(image_meta["placeholder_path"], sr_path)
+        except FileExistsError as exc:
+            raise FileExistsError(
+                f"Output already exists at {sr_path}. Pass overwrite=True to replace it."
+            ) from exc
+        os.unlink(image_meta["placeholder_path"])
     self.final_sr_path = sr_path
+
+    for aux_path in (sum_path, weight_path):
+        try:
+            os.remove(aux_path)
+        except FileNotFoundError:
+            pass
+
+    if cleanup:
+        for fp in to_delete:
+            try:
+                os.remove(fp)
+            except FileNotFoundError:
+                pass
+            for leftover in glob.glob(fp + ".*"):
+                try:
+                    os.remove(leftover)
+                except FileNotFoundError:
+                    pass
 
     self._log(f"🧩 Stitched {len(entries)} tiles into: {sr_path}")
 
@@ -654,6 +701,7 @@ def ddp_safe_stitch(
     limit=None,
     *,
     cleanup_every=50,
+    cleanup=True,
     profile="linear",
     profile_alpha=6.0,
     gdal_cache_mb=256,
@@ -663,8 +711,8 @@ def ddp_safe_stitch(
 
     This function ensures that the stitching phase runs only once on the
     global rank 0 process when using multi-GPU training with PyTorch Lightning
-    (DDP). All other ranks return immediately. Unlike the idempotent version,
-    this implementation will overwrite an existing ``sr.tif`` if found.
+    (DDP). All other ranks return immediately. Existing output is replaced
+    atomically only after a complete, validated stitch succeeds.
 
     Behavior by environment
     -----------------------
@@ -676,9 +724,8 @@ def ddp_safe_stitch(
     Overwrite policy
     ----------------
     - If a final output file ``sr.tif`` already exists in the target folder,
-      it is **deleted and replaced** by a fresh stitched output.
-    - A warning message is printed to notify that the file will be
-      overwritten.
+      it is replaced after validation; failures leave it untouched.
+    - A warning message is printed to notify that the file will be replaced.
     - If a placeholder file ``sr_placeholder.tif`` exists, it will be used
       as the stitching target as normal.
 
@@ -691,10 +738,14 @@ def ddp_safe_stitch(
         Path to the ``index.json`` file describing all patches. Defaults to
         ``<temp_folder>/index.json``.
     limit : int, optional
-        If given, only the first ``limit`` patches are stitched (useful
-        for debugging).
+        If given, only the first ``limit`` patches are considered. They must
+        still cover the complete output before publication.
     cleanup_every : int, default=50
-        Frequency (in tiles) at which staged temporary files are deleted.
+        Retained for API compatibility; cleanup occurs after successful
+        publication rather than periodically.
+    cleanup : bool, default=True
+        Remove consumed patches after successful publication. ``False`` keeps
+        every patch and the manifest.
     profile : {"linear", "sigmoid", "cosine"}, default="linear"
         Feathering profile used when blending overlaps
         (see :func:`write_to_placeholder`).
@@ -748,13 +799,13 @@ def ddp_safe_stitch(
                     f"Output already exists at {sr_path}. Pass overwrite=True to replace it."
                 )
             self._log(f"⚠️ Existing output found at {sr_path} — will be overwritten.")
-            os.remove(sr_path)
 
         out = stitch_sr_patches(
             self,
             index_path=index_path,
             limit=limit,
             cleanup_every=cleanup_every,
+            cleanup=cleanup,
             profile=profile,
             profile_alpha=profile_alpha,
             gdal_cache_mb=gdal_cache_mb,

@@ -1,89 +1,20 @@
+"""Wrap SR models for streamed inference and collective manifest finalization.
+
+Each rank persists patches and a shard index. All ranks exchange write status;
+rank zero validates and atomically publishes the merged index. Hooks are bound
+on preparation so plain PyTorch and Lightning models share the same workflow.
+"""
+
 import os
 import json
 import torch
 import numpy as np
 from pytorch_lightning import LightningModule
 import time
-import glob
 import math
+from numbers import Integral
+from datetime import timedelta
 from PIL import Image
-
-"""
-Multi-GPU SR Inference Workflow
-================================
-
-   ┌─────────────┐
-   │ Trainer.run │
-   └──────┬──────┘
-          │
-          ▼
-   ┌─────────────────────────┐
-   │ Each GPU rank executes: │
-   └──────────┬──────────────┘
-              │
-              ▼
-   [on_predict_start]
-        │  Initialize:
-        │   - rank/world_size
-        │   - temp folder
-        │   - local entries[]
-        ▼
-   [predict_step]
-        │  For each batch:
-        │   - Run model (SR patch)
-        │   - Save patch → temp/sr_rXXXX_cXXXX.npz
-        │   - Append offsets + path to entries[]
-        ▼
-   [on_predict_end]
-        │  Write shard index_rank{r}.json
-        │
-        │───► DDP barrier ───(all ranks wait)───┐
-        │                                      │
-        ▼                                      │
-   Rank >0:                                    │ Rank 0:
-   - Finished                                  │  - Collect all shard JSONs
-   - Optionally delete shards                  │  - Merge entries[]
-                                               │  - Deduplicate + sort
-                                               │  - Write global index.json
-                                               │  - Clean up shard files
-                                               ▼
-                                        ┌───────────────┐
-                                        │ index.json    │
-                                        │ (global list) │
-                                        └───────────────┘
-"""
-
-
-"""
-Module: preprocess_model
-
-Provides utilities to wrap a PyTorch or Lightning model for distributed
-super-resolution (SR) inference. The core workflow integrates with PyTorch
-Lightning’s `.predict()` loop:
-
-1. **Model wrapping**
-   - Accepts a plain `torch.nn.Module`, `LightningModule`, or `None`.
-   - If `None`, a placeholder bilinear upsampling model is used.
-   - If plain torch model, it is wrapped into a minimal LightningModule.
-
-2. **Hook injection**
-   - Adds `on_predict_start`, `predict_step`, and `on_predict_end` hooks.
-   - These hooks handle patch inference, saving results to disk, and writing
-     per-rank index files.
-
-3. **Distributed execution (DDP)**
-   - Each GPU rank saves its own shard (`index_rank{r}.json`).
-   - Synchronization barrier ensures all ranks finish writing.
-   - Rank 0 merges shards into a global `index.json` in deterministic order.
-
-4. **Temporary storage**
-   - SR patches are saved to `.npz` files in `temp/`.
-   - Index JSON stores file paths, LR/HR offsets, and dimensions.
-
-This design allows inference on arbitrarily large raster datasets across
-multiple GPUs without memory bottlenecks. Patches are streamed to disk and
-stitched later.
-"""
 
 
 # -------------------------------------------------------------------------
@@ -125,28 +56,40 @@ class SRModelPL(LightningModule):
 
 
 def get_world_info():
-    """
-    Return (world_size, rank) in a robust way:
-    - CPU or single-GPU: world_size = 1
-    - Multi-GPU DDP: world_size = number of GPUs (world size)
-    """
+    """Return process world size and global rank, regardless of visible GPUs."""
     ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
 
     if ddp:
         world_size = torch.distributed.get_world_size()
         rank = torch.distributed.get_rank()
     else:
-        # if CUDA is available, check how many GPUs are visible
-        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        world_size = gpu_count if gpu_count > 1 else 1
-        rank = 0
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        rank = int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0")))
 
     return world_size, rank
 
 
+def _distributed_barrier(timeout_seconds=30):
+    """Synchronize ranks while turning gloo failures into regular exceptions."""
+    dist = torch.distributed
+    backend = None
+    try:
+        backend = dist.get_backend()
+    except (AttributeError, RuntimeError, ValueError):
+        pass
+    if backend == "gloo" and hasattr(dist, "monitored_barrier"):
+        try:
+            return dist.monitored_barrier(timeout=timedelta(seconds=timeout_seconds))
+        except TypeError:  # older torch versions have no timeout parameter
+            return dist.monitored_barrier()
+    return dist.barrier()
+
+
 # -------------------------------------------------------------------------
 # Preprocessor that also attaches predict_step + hooks that save predictions to disk
-def preprocess_model(self, model, temp_folder, windows, factor):
+def preprocess_model(
+    self, model, temp_folder, windows, factor, output_units="normalized"
+):
     """
     Prepare a model for distributed patch-based super-resolution inference.
 
@@ -164,6 +107,10 @@ def preprocess_model(self, model, temp_folder, windows, factor):
         List of LR windows corresponding to input patches.
     factor : int
         Positive integer output scale. Use 1 for models that preserve resolution.
+    output_units : {"normalized", "reflectance"}, default="normalized"
+        Interpretation of model predictions before persistence. Normalized values
+        are clipped to [0, 1] and scaled to uint16 [0, 10000]; reflectance/DN
+        values are clipped directly to [0, 10000].
 
     Returns
     -------
@@ -203,6 +150,15 @@ def preprocess_model(self, model, temp_folder, windows, factor):
     if not isinstance(factor, int) or isinstance(factor, bool) or factor <= 0:
         raise ValueError("factor must be a positive integer.")
     factor = int(factor)
+    unit_aliases = {
+        "normalized": "normalized",
+        "normalised": "normalized",
+        "reflectance": "reflectance",
+        "dn": "reflectance",
+    }
+    units = unit_aliases.get(str(output_units).strip().lower())
+    if units is None:
+        raise ValueError("output_units must be 'normalized' or 'reflectance'.")
 
     # --- define hooks here so they stay out of the global namespace ---
     def _rank_world(self):
@@ -260,13 +216,34 @@ def preprocess_model(self, model, temp_folder, windows, factor):
         - Handles both dict-of-lists (PL default) and list-of-dict meta formats.
         - Saves filenames as `sr_r{row_off_hr}_c{col_off_hr}.npz`.
         """
+        # An empty rank needs hooks to run, but has no image to infer.
+        if "_opensr_empty_rank" in batch:
+            return None
         x = batch["image"]  # (B,C,H,W) tensor
         meta = batch["meta"]  # list[dict] or dict of lists
+        if not isinstance(x, torch.Tensor) or x.ndim != 4:
+            raise ValueError("Input batch image must be a 4-D tensor (B,C,H,W).")
+        input_batch = int(x.shape[0])
         sr = self.predict(x) if hasattr(self, "predict") else self.forward(x)
+        if not isinstance(sr, torch.Tensor) or sr.ndim != 4:
+            raise ValueError("Model output must be a 4-D tensor (B,C,H,W).")
+        if int(sr.shape[0]) != input_batch:
+            raise ValueError(
+                "Model output batch size does not match input batch size: "
+                f"got {int(sr.shape[0])}, expected {input_batch}."
+            )
+        if not torch.isfinite(sr).all().item():
+            raise ValueError(
+                "Model output contains NaN or infinite values; predictions must be finite."
+            )
         sr = sr.detach().cpu()  # (B,C,Hh,Ww)
 
         scale = int(self._save_factor)
         B, C, Hh, Ww = sr.shape
+        if C <= 0 or Hh <= 0 or Ww <= 0:
+            raise ValueError(
+                "Model output must have positive channel and spatial dimensions."
+            )
         if self._output_bands is None:
             self._output_bands = int(C)
         elif int(C) != int(self._output_bands):
@@ -275,10 +252,74 @@ def preprocess_model(self, model, temp_folder, windows, factor):
             )
 
         # meta may be a dict of lists (PL default); normalize to per-sample dicts
-        if isinstance(meta, dict) and isinstance(meta["row_off"], torch.Tensor):
-            meta = [{k: int(v[i].item()) for k, v in meta.items()} for i in range(B)]
-        elif isinstance(meta, dict):
-            meta = [{k: int(v[i]) for k, v in meta.items()} for i in range(B)]
+        if isinstance(meta, dict):
+            required = ("row_off", "col_off", "height", "width")
+            missing = [key for key in required if key not in meta]
+            if missing:
+                raise ValueError(
+                    f"Prediction metadata is missing required fields: {', '.join(missing)}."
+                )
+            try:
+                lengths = {len(value) for value in meta.values()}
+            except TypeError as exc:
+                raise ValueError(
+                    "Prediction metadata values must be batched sequences."
+                ) from exc
+            if lengths != {B}:
+                raise ValueError(
+                    f"Prediction metadata batch size does not match input batch size ({B})."
+                )
+            meta = [
+                {
+                    k: v[i].item() if isinstance(v, torch.Tensor) else v[i]
+                    for k, v in meta.items()
+                }
+                for i in range(B)
+            ]
+        elif isinstance(meta, (list, tuple)):
+            if len(meta) != B:
+                raise ValueError(
+                    f"Prediction metadata batch size does not match input batch size ({B})."
+                )
+            meta = list(meta)
+        else:
+            raise ValueError(
+                "Prediction metadata must be a dict of batches or a list of records."
+            )
+        for i, record in enumerate(meta):
+            missing = [
+                key
+                for key in ("row_off", "col_off", "height", "width")
+                if key not in record
+            ]
+            if missing:
+                raise ValueError(
+                    f"Prediction metadata record {i} is missing: {', '.join(missing)}."
+                )
+            for key in ("row_off", "col_off", "height", "width"):
+                value = record[key]
+                if isinstance(value, torch.Tensor) and value.numel() == 1:
+                    value = value.item()
+                if isinstance(value, bool) or not isinstance(value, Integral):
+                    raise ValueError(
+                        f"Prediction metadata record {i} requires an integer {key}."
+                    )
+                record[key] = int(value)
+                if record[key] < 0 and key in ("row_off", "col_off"):
+                    raise ValueError(
+                        f"Prediction metadata record {i} has a negative {key}."
+                    )
+                if record[key] <= 0 and key in ("height", "width"):
+                    raise ValueError(
+                        f"Prediction metadata record {i} has non-positive {key}."
+                    )
+            expected_h = record["height"] * scale
+            expected_w = record["width"] * scale
+            if Hh != expected_h or Ww != expected_w:
+                raise ValueError(
+                    f"Model output shape {Hh}x{Ww} does not match expected "
+                    f"{expected_h}x{expected_w} for factor {scale} (record {i})."
+                )
 
         for i in range(B):
             mi = meta[i]
@@ -286,18 +327,8 @@ def preprocess_model(self, model, temp_folder, windows, factor):
             col_off_lr = mi["col_off"]
             row_off_hr = row_off_lr * scale
             col_off_hr = col_off_lr * scale
-            expected_h = mi["height"] * scale
-            expected_w = mi["width"] * scale
-            if Hh != expected_h or Ww != expected_w:
-                raise ValueError(
-                    f"Model output shape {Hh}x{Ww} does not match expected "
-                    f"{expected_h}x{expected_w} for factor {scale}."
-                )
-
             s = sr[i]  # (C,Hh,Ww) float
-            mean_val = float(torch.mean(s))
-            # simple range heuristic: [0,1] vs already ~[0,10000]
-            if mean_val < 10:
+            if units == "normalized":
                 s = torch.clamp(s, 0.0, 1.0) * 10000.0
             else:
                 s = torch.clamp(s, 0.0, 10000.0)
@@ -364,8 +395,9 @@ def preprocess_model(self, model, temp_folder, windows, factor):
                     lr_rgb = (((lr_rgb) * gain) * 255.0).astype(np.uint8).clip(0, 255)
 
                     # CHW -> HWC for PIL
-                    rgb, lr_rgb = np.transpose(rgb, (1, 2, 0)), np.transpose(
-                        lr_rgb, (1, 2, 0)
+                    rgb, lr_rgb = (
+                        np.transpose(rgb, (1, 2, 0)),
+                        np.transpose(lr_rgb, (1, 2, 0)),
                     )
 
                     # save
@@ -384,146 +416,163 @@ def preprocess_model(self, model, temp_folder, windows, factor):
 
         return None
 
-    def on_predict_end(self):
-        """
-        Hook executed once prediction finishes.
-
-        Workflow
-        --------
-        1. Write per-rank shard JSON:
-        - Contains rank, world_size, factor, saved dtype/scale, and patch entries.
-        2. Synchronize ranks via `torch.distributed.barrier()` (if DDP).
-        3. Rank 0 collects shard JSONs:
-        - Waits for all shards to exist.
-        - Reads entries, merges, deduplicates, sorts by LR offsets.
-        - Writes merged global `index.json`.
-        4. Cleanup:
-        - Deletes shard JSONs (optional).
-        - Deletes leftover partial files (optional).
-
-        Multi-GPU Details
-        -----------------
-        - Each GPU saves only the patches it predicted.
-        - Index merging ensures a single consistent record of all patches.
-        - Sorting by (row_off_lr, col_off_lr) guarantees deterministic order.
-
-        Prints
-        ------
-        - Per-rank: number of entries written.
-        - Rank 0: total merged entries and output path of `index.json`.
-        """
-        shard = {
-            "rank": self._rank,
-            "world_size": self._world,
+    def manifest_metadata(self):
+        return {
             "factor": int(self._save_factor),
             "output_bands": int(self._output_bands or 0),
-            "entries": self._entries,
             "saved_dtype": "uint16",
             "saved_scale": 10000,
+            "output_units": units,
             "saved_container": "npz" if self._save_compressed else "npy",
             "saved_key": "arr",
         }
-        shard_path = os.path.join(
-            self._save_temp_folder, f"index_rank{self._rank}.json"
+
+    def write_manifest(path, data):
+        # Readers see complete JSON, even on a slow shared filesystem.
+        part = path + ".part"
+        with open(part, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(part, path)
+
+    def merge_shards(self, world):
+        """Validate and publish a deterministic index; retain shards on failure."""
+        paths = [
+            os.path.join(self._save_temp_folder, f"index_rank{rank}.json")
+            for rank in range(world)
+        ]
+        # Permit a short metadata-visibility delay on shared filesystems.
+        for _ in range(50):
+            if all(os.path.exists(path) for path in paths):
+                break
+            time.sleep(0.05)
+
+        metadata = manifest_metadata(self)
+        output_bands = None
+        entries = []
+        for path in paths:
+            if not os.path.exists(path):
+                raise RuntimeError(f"Missing prediction shard index: {path}")
+            with open(path, encoding="utf-8") as stream:
+                shard = json.load(stream)
+            for field in (
+                "factor",
+                "saved_dtype",
+                "saved_scale",
+                "output_units",
+                "saved_container",
+            ):
+                if field in shard and shard[field] != metadata[field]:
+                    raise ValueError(f"Prediction shards disagree on {field}.")
+            bands = shard.get("output_bands")
+            if bands:
+                if output_bands is not None and int(bands) != output_bands:
+                    raise ValueError(
+                        "Prediction shards disagree on output band count: "
+                        f"{output_bands} vs {bands}."
+                    )
+                output_bands = int(bands)
+            entries.extend(shard.get("entries", []))
+
+        # Duplicate records from the same patch are harmless. Distinct windows
+        # must remain in deterministic row/column order for reproducibility.
+        unique = {}
+        for entry in entries:
+            key = (entry["row_off_lr"], entry["col_off_lr"], entry["path"])
+            unique.setdefault(key, entry)
+        entries = sorted(
+            unique.values(),
+            key=lambda entry: (entry["row_off_lr"], entry["col_off_lr"]),
         )
-        with open(shard_path, "w") as f:
-            json.dump(shard, f, separators=(",", ":"))  # compact
-            f.flush()
-            os.fsync(f.fileno())
-        # print(f"[rank {self._rank}] wrote {len(self._entries)} entries → {shard_path}")
+        entry_bands = {int(entry["bands"]) for entry in entries if entry.get("bands")}
+        if len(entry_bands) > 1 or (
+            entry_bands and output_bands is not None and entry_bands != {output_bands}
+        ):
+            raise ValueError("Prediction entries disagree on output band count.")
+        metadata["output_bands"] = output_bands or next(iter(entry_bands), 0)
+        write_manifest(
+            os.path.join(self._save_temp_folder, "index.json"),
+            {**metadata, "entries": entries},
+        )
+        for path in paths:
+            os.remove(path)
 
-        # ---- DDP sync ----
-        ddp = torch.distributed.is_available() and torch.distributed.is_initialized()
+    def on_predict_end(self):
+        """Persist every shard and exchange errors at matching collective phases.
+
+        Every live rank reaches the barrier even if its local write failed.
+        After synchronization, all ranks exchange write status before rank zero
+        merges. Merge errors are broadcast so workers cannot report success.
+        A failed barrier exits directly: another collective on a broken group
+        could hang. The launcher's process-group timeout bounds other collectives.
+        """
+        dist = torch.distributed
+        ddp = dist.is_available() and dist.is_initialized()
+        backend = None
         if ddp:
-            torch.distributed.barrier()
+            try:
+                backend = dist.get_backend()
+            except (AttributeError, RuntimeError, ValueError):
+                pass  # Lightweight tests may supply only rank/barrier metadata.
 
-        # ---- Merge on rank 0 (or single-process) ----
-        if (not ddp) or (torch.distributed.get_rank() == 0):
-            world = self._world if ddp else 1
-            shard_paths = [
-                os.path.join(self._save_temp_folder, f"index_rank{r}.json")
-                for r in range(world)
-            ]
-
-            # (Optional) wait briefly if FS is slow
-            for _ in range(50):
-                if all(os.path.exists(p) for p in shard_paths):
-                    break
-                time.sleep(0.05)
-
-            merged_entries = []
-            meta = {
-                "factor": int(self._save_factor),
-                "output_bands": None,
-                "saved_dtype": "uint16",
-                "saved_scale": 10000,
-                "saved_container": "npz" if self._save_compressed else "npy",
-                "saved_key": "arr",
-            }
-            for p in shard_paths:
-                if not os.path.exists(p):
-                    raise RuntimeError(f"Missing prediction shard index: {p}")
-                with open(p) as f:
-                    data = json.load(f)
-                shard_bands = data.get("output_bands")
-                if shard_bands:
-                    if meta["output_bands"] is None:
-                        meta["output_bands"] = int(shard_bands)
-                    elif int(shard_bands) != int(meta["output_bands"]):
-                        raise ValueError(
-                            "Prediction shards disagree on output band count: "
-                            f"{meta['output_bands']} vs {shard_bands}."
-                        )
-                merged_entries.extend(data.get("entries", []))
-
-            # dedupe & deterministic order
-            # key by LR offsets + path (handles accidental dupes)
-            seen = set()
-            uniq = []
-            for e in merged_entries:
-                k = (e["row_off_lr"], e["col_off_lr"], e["path"])
-                if k not in seen:
-                    seen.add(k)
-                    uniq.append(e)
-            uniq.sort(key=lambda e: (e["row_off_lr"], e["col_off_lr"]))
-            entry_bands = {int(e["bands"]) for e in uniq if e.get("bands")}
-            if len(entry_bands) > 1:
-                raise ValueError(
-                    f"Prediction entries disagree on output band count: {sorted(entry_bands)}."
-                )
-            if meta["output_bands"] is None and entry_bands:
-                meta["output_bands"] = entry_bands.pop()
-            if meta["output_bands"] is None:
-                meta["output_bands"] = 0
-
-            merged = {**meta, "entries": uniq}
-            merged_path = os.path.join(self._save_temp_folder, "index.json")
-            with open(merged_path, "w") as f:
-                json.dump(merged, f, separators=(",", ":"))
-                f.flush()
-                os.fsync(f.fileno())
-            # print(f"[rank 0] merged {len(uniq)} entries → {merged_path}")
-
-        # CleanUp
+        original_error = None
+        error = None
         try:
-            KEEP_SHARDS = False  # toggle for debugging
-            KEEP_PARTS = False  # toggle for debugging
-            if not KEEP_SHARDS:
-                for p in shard_paths:
-                    try:
-                        os.remove(p)
-                    except FileNotFoundError:
-                        pass
+            write_manifest(
+                os.path.join(self._save_temp_folder, f"index_rank{self._rank}.json"),
+                {
+                    **manifest_metadata(self),
+                    "rank": self._rank,
+                    "world_size": self._world,
+                    "entries": self._entries,
+                },
+            )
+        except Exception as exc:
+            original_error = exc
+            error = f"{type(exc).__name__}: {exc}"
 
-            # optional: nuke partials
-            if KEEP_PARTS == False:
-                for p in glob.glob(os.path.join(self._save_temp_folder, "*.part")):
-                    try:
-                        os.remove(p)
-                    except FileNotFoundError:
-                        pass
-        except UnboundLocalError:
-            pass  # If we're in single GPU, or in CPU, these variables dont exist
+        if ddp:
+            try:
+                _distributed_barrier(getattr(self, "_save_sync_timeout", 30))
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Distributed prediction finalization failed: synchronization barrier: {exc}"
+                ) from exc
+
+        if backend is not None:
+            statuses = [None] * self._world
+            try:
+                dist.all_gather_object(statuses, error)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Distributed prediction finalization failed: write-status exchange: {exc}"
+                ) from exc
+            error = next((status for status in statuses if status is not None), None)
+        if error is not None:
+            if backend is None:
+                raise original_error
+            raise RuntimeError(f"Distributed prediction finalization failed: {error}")
+
+        if not ddp or self._rank == 0:
+            try:
+                merge_shards(self, self._world if ddp else 1)
+            except Exception as exc:
+                original_error = exc
+                error = f"{type(exc).__name__}: {exc}"
+        if backend is not None:
+            status = [error]
+            try:
+                dist.broadcast_object_list(status, src=0)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Distributed prediction finalization failed: merge-status exchange: {exc}"
+                ) from exc
+            error = status[0]
+        if error is not None:
+            if backend is None:
+                raise original_error
+            raise RuntimeError(f"Distributed prediction finalization failed: {error}")
 
     # ---------------------------------------------------------------------
     # Attach hooks to model
@@ -589,4 +638,5 @@ def preprocess_model(self, model, temp_folder, windows, factor):
     model._save_temp_folder = temp_folder
     model._save_windows = windows
     model._save_factor = factor
+    model._save_output_units = units
     return model

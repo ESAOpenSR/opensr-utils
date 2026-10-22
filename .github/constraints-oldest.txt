@@ -1,0 +1,8 @@
+# Dependency floor for local Python 3.9 compatibility checks. Keep these pins
+# together: Torch 2.0 predates NumPy 2's ABI and its Lightning stack has a
+# narrower compatibility range than current releases.
+numpy<2
+torch==2.0.0
+torchvision==0.15.1
+pytorch-lightning==2.0.9
+torchmetrics==1.2.1
