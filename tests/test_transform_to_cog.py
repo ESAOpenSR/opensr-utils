@@ -69,7 +69,7 @@ def test_make_cog_falls_back_to_rio_cogeo(monkeypatch, tmp_path):
 
 
 def test_readable_with_checksums_opens_valid_raster(write_raster, tmp_path):
-    pytest.importorskip("rasterio")
+    __import__("rasterio")
     tif = write_raster(tmp_path / "sr.tif", data=[[[1, 2], [3, 4]]])
 
     assert transform_to_cog.readable_with_checksums(tif) is True
@@ -118,3 +118,68 @@ def test_process_tree_counts_validation_failures(monkeypatch, tmp_path):
 
     assert transform_to_cog.process_tree(tmp_path, remove_original=True) == (0, 1)
     assert sr.exists()
+
+
+@pytest.mark.integration
+def test_real_cog_conversion_preserves_pixels_and_spatial_metadata(
+    write_raster, tmp_path
+):
+    import numpy as np
+    import rasterio
+    from rio_cogeo.cogeo import cog_validate
+
+    data = np.arange(3 * 16 * 20, dtype=np.uint16).reshape(3, 16, 20)
+    source = write_raster(tmp_path / "source.tif", data=data, crs="EPSG:32632")
+    output = tmp_path / "cog.tif"
+    transform_to_cog.make_cog(source, output)
+    assert cog_validate(output)[0]
+    assert transform_to_cog.readable_with_checksums(output)
+    with rasterio.open(source) as original, rasterio.open(output) as cog:
+        np.testing.assert_array_equal(cog.read(), data)
+        assert cog.crs == original.crs
+        assert cog.transform == original.transform
+        assert cog.nodata == original.nodata
+        assert cog.dtypes == original.dtypes
+    assert source.exists()
+
+
+@pytest.mark.parametrize("failure", ["conversion", "validation", "readability"])
+def test_cog_failure_preserves_original_and_continues_to_next_file(
+    monkeypatch, tmp_path, failure
+):
+    install_fake_cog_validate(monkeypatch)
+    sources = [tmp_path / name / "sr.tif" for name in ["bad", "good"]]
+    for source in sources:
+        source.parent.mkdir()
+        source.write_bytes(b"original")
+
+    def convert(source, output):
+        if source.parent.name == "bad" and failure == "conversion":
+            raise OSError("conversion failed")
+        output.write_bytes(b"cog")
+
+    def validate(path):
+        return (not (path.parent.name == "bad" and failure == "validation"), [], [])
+
+    monkeypatch.setattr(transform_to_cog, "make_cog", convert)
+    monkeypatch.setattr(sys.modules["rio_cogeo.cogeo"], "cog_validate", validate)
+    monkeypatch.setattr(
+        transform_to_cog,
+        "readable_with_checksums",
+        lambda path: not (path.parent.name == "bad" and failure == "readability"),
+    )
+    assert transform_to_cog.process_tree(tmp_path, remove_original=True) == (1, 1)
+    assert sources[0].read_bytes() == b"original"
+    assert not sources[1].exists()
+
+
+def test_cog_dry_run_does_not_modify_existing_files(monkeypatch, tmp_path):
+    install_fake_cog_validate(monkeypatch)
+    source, output = tmp_path / "sr.tif", tmp_path / "sr_cog.tif"
+    source.write_bytes(b"source")
+    output.write_bytes(b"existing cog")
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    assert transform_to_cog.process_tree(
+        tmp_path, dry_run=True, remove_original=True
+    ) == (0, 0)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before

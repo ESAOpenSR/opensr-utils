@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 
 class DummyRunner(SimpleNamespace):
     def __init__(self, **kwargs):
@@ -20,6 +22,17 @@ class DummyRunner(SimpleNamespace):
 def clean_rank_env(monkeypatch):
     for name in ("LOCAL_RANK", "RANK", "WORLD_SIZE", "OPENSR_RUN_ID"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def block_http(monkeypatch):
+    """Network/model downloads belong behind a mocked boundary in this suite."""
+    import requests
+
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("Unexpected HTTP request: mock model downloads in tests")
+
+    monkeypatch.setattr(requests.sessions.Session, "request", unexpected_request)
 
 
 @pytest.fixture
@@ -41,8 +54,8 @@ def write_raster():
         crs: str = "EPSG:4326",
         nodata=0,
     ):
-        np = pytest.importorskip("numpy")
-        rasterio = pytest.importorskip("rasterio")
+        import numpy as np
+        import rasterio
         from rasterio.transform import from_origin
 
         path = Path(path)
@@ -73,6 +86,53 @@ def write_raster():
         return path
 
     return _write_raster
+
+
+@pytest.fixture
+def pipeline_factory():
+    """Build CPU runners without inference; close raster handles after each test."""
+    from opensr_utils.pipeline import large_file_processing
+
+    runners = []
+
+    def make(root, **overrides):
+        options = dict(
+            model=None,
+            window_size=(8, 8),
+            factor=2,
+            overlap=4,
+            eliminate_border_px=0,
+            device="cpu",
+            batch_size=2,
+            num_workers=0,
+            prefetch_factor=0,
+            auto_run=False,
+            cleanup=False,
+        )
+        options.update(overrides)
+        runner = large_file_processing(root=str(root), **options)
+        runners.append(runner)
+        return runner
+
+    yield make
+    for runner in runners:
+        runner.datamodule.dataset.close()
+
+
+@pytest.fixture
+def dataset_factory():
+    from opensr_utils.data_utils.datamodule import PredictionDataset
+
+    datasets = []
+
+    def make(**kwargs):
+        dataset = PredictionDataset(**kwargs)
+        datasets.append(dataset)
+        return dataset
+
+    yield make
+    for dataset in datasets:
+        dataset.close()
 
 
 @pytest.fixture

@@ -4,10 +4,7 @@ from pathlib import Path
 
 import pytest
 
-np = pytest.importorskip("numpy")
-pytest.importorskip("rasterio")
-pytest.importorskip("torch")
-pytest.importorskip("pytorch_lightning")
+import numpy as np
 
 from rasterio.transform import from_origin  # noqa: E402
 
@@ -87,8 +84,8 @@ def test_large_file_processing_can_prepare_without_running(write_raster, tmp_pat
 def test_large_file_processing_runs_small_image_factor_three_two_band_model(
     write_raster, tmp_path
 ):
-    torch = pytest.importorskip("torch")
-    rasterio = pytest.importorskip("rasterio")
+    import torch
+    import rasterio
 
     class TwoBandUpsampler(torch.nn.Module):
         def forward(self, x):
@@ -127,8 +124,8 @@ def test_large_file_processing_runs_small_image_factor_three_two_band_model(
 def test_large_file_processing_runs_factor_one_tiled_identity_model(
     write_raster, tmp_path
 ):
-    torch = pytest.importorskip("torch")
-    rasterio = pytest.importorskip("rasterio")
+    import torch
+    import rasterio
 
     class FirstBandIdentity(torch.nn.Module):
         def forward(self, x):
@@ -243,7 +240,8 @@ def test_create_image_windows_cover_pixels_without_underlapping(
 
 
 def test_create_placeholder_file_writes_scaled_geotiff(tmp_path):
-    rasterio = pytest.importorskip("rasterio")
+    import rasterio
+
     runner = blank_runner()
     runner.temp_folder = str(tmp_path / "temp_unit")
     runner.placeholder_filepath = str(tmp_path / "sr_placeholder.tif")
@@ -292,7 +290,8 @@ def test_create_placeholder_file_skips_existing_readable_file(tmp_path):
 
 
 def test_create_placeholder_file_can_use_prediction_output_metadata(tmp_path):
-    rasterio = pytest.importorskip("rasterio")
+    import rasterio
+
     runner = blank_runner()
     runner.temp_folder = str(tmp_path / "temp_unit")
     runner.placeholder_filepath = str(tmp_path / "sr_placeholder.tif")
@@ -404,12 +403,11 @@ def test_write_to_file_delegates_to_ddp_safe_stitch(monkeypatch, tmp_path):
     assert calls[0][1]["profile"] == "sigmoid"
 
 
-def test_write_to_file_creates_placeholder_from_prediction_index(
-    monkeypatch, tmp_path
-):
+def test_write_to_file_creates_placeholder_from_prediction_index(monkeypatch, tmp_path):
     from opensr_utils.data_utils import writing_utils
 
-    rasterio = pytest.importorskip("rasterio")
+    import rasterio
+
     runner = blank_runner()
     runner.overwrite = True
     runner.trainer = type("Trainer", (), {"is_global_zero": True})()
@@ -468,3 +466,59 @@ def test_safe_band_selection_excludes_auxiliary_rasters(write_raster, tmp_path):
 
     assert runner.image_meta["bands"] == 4
     assert set(runner.image_meta["lr_file_dict"]) == {"R", "G", "B", "NIR"}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"window_size": "8,8"},
+        {"window_size": (8, 8, 8)},
+        {"window_size": (-1, 8)},
+        {"window_size": (8.0, 8)},
+        {"overlap": -2},
+        {"overlap": 4.0},
+        {"overlap": 8},
+        {"eliminate_border_px": -2},
+        {"eliminate_border_px": 2.0},
+        {"factor": True},
+        {"factor": False},
+        {"factor": -1},
+        {"factor": 2.5},
+        {"factor": "2"},
+        {"device": "cuda:0"},
+        {"device": "mps"},
+        {"batch_size": -1},
+        {"batch_size": 1.5},
+        {"num_workers": 1.5},
+        {"prefetch_factor": -1},
+        {"prefetch_factor": "2"},
+        {"gpus": [-1]},
+        {"gpus": ["0"]},
+        {"gpus": [0.0]},
+    ],
+)
+def test_invalid_options_fail_before_creating_any_files(
+    tmp_path, pipeline_factory, options
+):
+    with pytest.raises((ValueError, TypeError)):
+        pipeline_factory(tmp_path / "input.tif", **options)
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "device,gpus,expected",
+    [
+        ("cpu", None, None),
+        ("cpu", [0, 1], None),
+        ("cuda", None, [0]),
+        ("cuda", 2, [2]),
+        ("cuda", (1, 3), [1, 3]),
+    ],
+)
+def test_device_selection_normalizes_gpu_ids_without_running_inference(
+    device, gpus, expected, write_raster, pipeline_factory, tmp_path
+):
+    path = write_raster(tmp_path / "input.tif")
+    runner = pipeline_factory(path, device=device, gpus=gpus)
+    assert runner.gpus == expected
+    assert runner.device == device

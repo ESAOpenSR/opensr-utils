@@ -1,63 +1,81 @@
+"""Model loading mocks the HTTP/checkpoint boundary and never downloads weights."""
+
 from __future__ import annotations
 
-import importlib
+import importlib.util
+from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
 
 
-def test_get_ldsrs2_downloads_config_and_loads_checkpoint(monkeypatch):
-    calls = {}
+@pytest.fixture
+def loader(monkeypatch):
+    response = Mock(text="ckpt_version: fake-v1")
+    get = Mock(return_value=response)
+    config = SimpleNamespace(ckpt_version="fake-v1")
+    load_config = Mock(return_value=config)
+    model = Mock()
+    construct = Mock(return_value=model)
+    for name, attrs in {
+        "requests": {"get": get},
+        "omegaconf": {"OmegaConf": SimpleNamespace(load=load_config)},
+        "opensr_model": {"SRLatentDiffusion": construct},
+    }.items():
+        module = types.ModuleType(name)
+        module.__dict__.update(attrs)
+        monkeypatch.setitem(sys.modules, name, module)
+    # Keep mocked imports out of the real module cache and package attributes.
+    path = (
+        Path(__file__).resolve().parents[1] / "opensr_utils/model_utils/get_models.py"
+    )
+    spec = importlib.util.spec_from_file_location("isolated_model_loader", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return SimpleNamespace(
+        module=module,
+        get=get,
+        response=response,
+        config=config,
+        load_config=load_config,
+        model=model,
+        construct=construct,
+    )
 
-    class FakeResponse:
-        text = "ckpt_version: fake-v1"
 
-        def raise_for_status(self):
-            calls["raised"] = True
+@pytest.mark.parametrize("device", ["cpu", "cuda:0", "cuda:2"])
+def test_model_loader_validates_response_and_loads_requested_checkpoint(loader, device):
+    assert loader.module.get_ldsrs2(device=device) is loader.model
+    args, kwargs = loader.get.call_args
+    assert args[0].endswith("/opensr_model/configs/config_10m.yaml")
+    assert kwargs["timeout"] > 0
+    loader.response.raise_for_status.assert_called_once_with()
+    assert loader.load_config.call_args.args[0].getvalue() == "ckpt_version: fake-v1"
+    loader.construct.assert_called_once_with(loader.config, device=device)
+    loader.model.load_pretrained.assert_called_once_with("fake-v1")
 
-    fake_requests = types.ModuleType("requests")
 
-    def get(url, timeout):
-        calls["url"] = url
-        calls["timeout"] = timeout
-        return FakeResponse()
-
-    fake_requests.get = get
-
-    class FakeOmegaConf:
-        @staticmethod
-        def load(stream):
-            calls["config_text"] = stream.read()
-            return SimpleNamespace(ckpt_version="fake-v1")
-
-    fake_omegaconf = types.ModuleType("omegaconf")
-    fake_omegaconf.OmegaConf = FakeOmegaConf
-
-    fake_opensr_model = types.ModuleType("opensr_model")
-
-    class FakeSRLatentDiffusion:
-        def __init__(self, config, device):
-            self.config = config
-            self.device = device
-            self.loaded = None
-
-        def load_pretrained(self, version):
-            self.loaded = version
-
-    fake_opensr_model.SRLatentDiffusion = FakeSRLatentDiffusion
-
-    monkeypatch.setitem(sys.modules, "requests", fake_requests)
-    monkeypatch.setitem(sys.modules, "omegaconf", fake_omegaconf)
-    monkeypatch.setitem(sys.modules, "opensr_model", fake_opensr_model)
-    sys.modules.pop("opensr_utils.model_utils.get_models", None)
-
-    module = importlib.import_module("opensr_utils.model_utils.get_models")
-    model = module.get_ldsrs2(device="cuda:0")
-
-    assert calls["url"].endswith("/opensr_model/configs/config_10m.yaml")
-    assert calls["timeout"] == 30
-    assert calls["raised"] is True
-    assert calls["config_text"] == "ckpt_version: fake-v1"
-    assert model.device == "cuda:0"
-    assert model.loaded == "fake-v1"
-    sys.modules.pop("opensr_utils.model_utils.get_models", None)
+@pytest.mark.parametrize(
+    "stage", ["request", "http_status", "config", "constructor", "checkpoint"]
+)
+def test_model_loading_errors_propagate_and_stop_later_stages(loader, stage):
+    operations = [
+        loader.get,
+        loader.response.raise_for_status,
+        loader.load_config,
+        loader.construct,
+        loader.model.load_pretrained,
+    ]
+    index = ["request", "http_status", "config", "constructor", "checkpoint"].index(
+        stage
+    )
+    error = RuntimeError(f"{stage} failed")
+    operations[index].side_effect = error
+    with pytest.raises(RuntimeError) as exc:
+        loader.module.get_ldsrs2()
+    assert exc.value is error
+    for operation in operations[index + 1 :]:
+        operation.assert_not_called()
