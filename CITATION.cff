@@ -16,9 +16,9 @@ authors:
 
 repository-code: 'https://github.com/ESAOpenSR/opensr-utils'
 url: 'https://opensr.eu/'
-version: 1.2.0
+version: 2.1.0
 doi: '10.5281/zenodo.17599310'
-date-released: 2025-11-12
+date-released: 2026-10-22
 
 keywords:
   - super-resolution
